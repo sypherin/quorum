@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+from pathlib import Path
 from typing import Any
 
 PRIMITIVES = ("noul", "choice", "score")
@@ -92,14 +94,39 @@ def build_messages(state: str, questions: dict) -> list[dict]:
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
 
 
+# ---------------------------------------------------------------------------
+# Calibration (temperature scaling)
+# ---------------------------------------------------------------------------
+
+def load_temperatures() -> dict[str, float]:
+    """Per-question-type temperatures from calibration.json.
+
+    Path: $SYSONE_CALIBRATION, else calibration.json next to this module.
+    Missing file => {} => T=1 passthrough (uncalibrated)."""
+    path = os.environ.get("SYSONE_CALIBRATION")
+    path = Path(path) if path else Path(__file__).with_name("calibration.json")
+    if not path.exists():
+        return {}
+    data = json.loads(path.read_text())
+    return {k: float(v) for k, v in data.get("temperatures", {}).items()}
+
+
+def temperature_for(kind: str, temps: dict[str, float]) -> float:
+    return temps.get(kind, temps.get("default", 1.0))
+
+
 def _match_candidate(tok_text: str, cand: str) -> bool:
     """Token is the start of candidate value (token may carry quotes/punct)."""
     t = tok_text.strip().strip('"').lstrip()
     return cand.startswith(t[: len(cand)]) and len(t) > 0
 
 
-def probs_at_position(logprobs: list, value_token_index: int, candidates: list[str]) -> dict[str, float] | None:
-    """Distribution over candidates from top_logprobs at the value's token position."""
+def probs_at_position(logprobs: list, value_token_index: int, candidates: list[str],
+                      temperature: float = 1.0) -> dict[str, float] | None:
+    """Distribution over candidates from top_logprobs at the value's token position.
+
+    `temperature` scales logprobs before normalization (softmax(lp / T));
+    T=1 is a passthrough."""
     if value_token_index is None or value_token_index >= len(logprobs):
         return None
     entry = logprobs[value_token_index]
@@ -114,7 +141,7 @@ def probs_at_position(logprobs: list, value_token_index: int, candidates: list[s
             continue
         for cand in candidates:
             if cand not in scores and _match_candidate(tok, cand):
-                scores[cand] = math.exp(lp)
+                scores[cand] = math.exp(lp / temperature)
                 break
     if len(scores) < 2:  # need at least a competing signal to be meaningful
         return None
@@ -124,7 +151,8 @@ def probs_at_position(logprobs: list, value_token_index: int, candidates: list[s
     return {c: scores.get(c, 0.0) / total for c in candidates}
 
 
-def probs_for_key(logprobs: list, key: str, candidates: list[str], max_walk: int = 4) -> dict[str, float] | None:
+def probs_for_key(logprobs: list, key: str, candidates: list[str], max_walk: int = 4,
+                  temperature: float = 1.0) -> dict[str, float] | None:
     """Distribution over candidates at the value position for `key`.
 
     The JSON emitter may put spacer tokens (' \"', ' ') between the colon and
@@ -134,7 +162,7 @@ def probs_for_key(logprobs: list, key: str, candidates: list[str], max_walk: int
     if start is None:
         return None
     for i in range(start, min(start + max_walk, len(logprobs))):
-        p = probs_at_position(logprobs, i, candidates)
+        p = probs_at_position(logprobs, i, candidates, temperature)
         if p is not None:
             return p
     return None
@@ -160,17 +188,22 @@ def find_value_token(logprobs: list, key: str) -> int | None:
     return None
 
 
-def extract_answers(raw_json: dict, questions: dict, logprobs: list | None) -> dict:
+def extract_answers(raw_json: dict, questions: dict, logprobs: list | None,
+                    temperatures: dict[str, float] | None = None) -> dict:
+    """`temperatures` maps question type -> T (from load_temperatures());
+    each question's logprobs are divided by its type's T before softmax."""
+    temps = temperatures or {}
     answers: dict[str, Any] = {}
     for qid, q in questions.items():
         t = q["type"]
+        temp = temperature_for(t, temps)
         val = raw_json.get(qid)
         if val is None:
             answers[qid] = {"type": t, "error": "missing answer"}
             continue
         lp = logprobs or []
         if t == "noul":
-            p = probs_for_key(lp, qid, ["yes", "no"])
+            p = probs_for_key(lp, qid, ["yes", "no"], temperature=temp)
             ans: dict[str, Any] = {"type": "noul", "noul": (p or {}).get(val, None if p is None else 0.0)}
             if p is not None:
                 ans["probabilities"] = p
@@ -180,7 +213,7 @@ def extract_answers(raw_json: dict, questions: dict, logprobs: list | None) -> d
             answers[qid] = ans
         elif t == "choice":
             opts = list(q["criteria"].keys())
-            p = probs_for_key(lp, qid, opts)
+            p = probs_for_key(lp, qid, opts, temperature=temp)
             ans = {"type": "choice", "choice": val}
             if p is not None:
                 ans["probabilities"] = p
@@ -192,7 +225,7 @@ def extract_answers(raw_json: dict, questions: dict, logprobs: list | None) -> d
             levels = q["criteria"]
             idx = int(val)
             cands = [str(i) for i in range(len(levels))]
-            p = probs_for_key(lp, qid, cands)
+            p = probs_for_key(lp, qid, cands, temperature=temp)
             ans = {
                 "type": "score",
                 "score": float(idx),

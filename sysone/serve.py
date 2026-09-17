@@ -3,6 +3,15 @@ local llama-server (default: judgment-gate 4B on 127.0.0.1:8005).
 
 No FastAPI dependency. Run:
   SYSONE_PORT=8017 uvicorn sysone.serve:app --host 127.0.0.1 --port 8017
+
+Calibration: per-question-type temperatures from calibration.json next to
+the package (or $SYSONE_CALIBRATION) are applied to logprobs before softmax.
+No file => T=1 passthrough. Fit with `python3 -m sysone.calibrate`.
+
+Logging: every successful judgment appends one JSONL record (state,
+questions, answers, label: null) to $SYSONE_LOG (default: log/judgments.jsonl
+under the repo root; SYSONE_LOG=off disables). Best-effort — never fails a
+request. Records are the raw material for sysone.calibrate once labeled.
 """
 from __future__ import annotations
 
@@ -10,6 +19,8 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 
@@ -18,6 +29,7 @@ from . import core
 UPSTREAM = os.environ.get("SYSONE_UPSTREAM", "http://127.0.0.1:8005")
 MODEL_ALIAS = os.environ.get("SYSONE_MODEL_ALIAS", "sysone-local-4b")
 MAX_STATE_CHARS = int(os.environ.get("SYSONE_MAX_STATE_CHARS", "60000"))
+DEFAULT_LOG = Path(__file__).resolve().parent.parent / "log" / "judgments.jsonl"
 
 
 async def _read_body(receive) -> bytes:
@@ -54,6 +66,41 @@ async def call_upstream(state: str, questions: dict) -> dict:
         return r.json()
 
 
+def _log_path() -> Path | None:
+    raw = os.environ.get("SYSONE_LOG")
+    if raw is None:
+        return DEFAULT_LOG
+    if raw.lower() in ("off", "0", "none", ""):
+        return None
+    return Path(raw)
+
+
+def log_record(state: str, questions: dict, answers: dict) -> None:
+    """Best-effort append of one judgment record to the JSONL log.
+
+    Never raises: logging must not break the judgment path. Records carry
+    state + questions + raw answers so outcomes can be labeled later and fed
+    to sysone.calibrate.
+    """
+    path = _log_path()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "endpoint": UPSTREAM,
+            "state": state,
+            "questions": questions,
+            "answers": answers,
+            "label": None,  # fill in later, per record or via a labeling pass
+        }
+        with path.open("a") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 async def handle_systemone(body: dict) -> tuple[int, dict]:
     try:
         state, questions = core.validate_request(body)
@@ -77,7 +124,7 @@ async def handle_systemone(body: dict) -> tuple[int, dict]:
         logprobs = ch.get("logprobs", {}).get("content") or None
     except AttributeError:
         logprobs = None
-    answers = core.extract_answers(raw, questions, logprobs)
+    answers = core.extract_answers(raw, questions, logprobs, core.load_temperatures())
     usage = resp.get("usage", {})
     out = {
         "model": MODEL_ALIAS,
@@ -89,6 +136,7 @@ async def handle_systemone(body: dict) -> tuple[int, dict]:
         "latency_ms": int((time.time() - t0) * 1000),
         "prob_method": "logprobs" if logprobs else "unavailable",
     }
+    log_record(state, questions, answers)
     return 200, out
 
 
