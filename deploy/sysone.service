@@ -1,0 +1,16 @@
+[Unit]
+Description=sysone — local TypeSafe SystemOne shim (ASGI :8017 -> judgment-gate :8005)
+After=judgment-gate.service
+Wants=judgment-gate.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/awpapa/dev/sysone
+Environment=SYSONE_UPSTREAM=http://127.0.0.1:8005
+Environment=SYSONE_MODEL_ALIAS=sysone-local-4b
+ExecStart=/home/awpapa/.local/bin/uvicorn sysone.serve:app --host 127.0.0.1 --port 8017
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
