@@ -1,11 +1,11 @@
-"""sysone.calibrate — fit per-question-type temperatures from labeled judgments.
+"""quorum.calibrate — fit per-question-type temperatures from labeled judgments.
 
 Input: a JSONL file where each line is one labeled judgment, e.g. derived
 from the judgment log (serve.py) once outcomes are known:
 
     {"qid": "intent", "kind": "choice", "probs": {"interested": 0.7, "not_now": 0.3}, "label": "not_now"}
 
-- "probs" keys are the answer values as sysone returns them (option keys for
+- "probs" keys are the answer values as quorum returns them (option keys for
   choice, "yes"/"no" for noul, digit strings for score).
 - "label" is the ground-truth answer value.
 - "kind" ("choice"|"noul"|"score") is optional; missing kinds group under
@@ -16,11 +16,11 @@ Method: per group, recover logprobs as log(probs) (softmax is invariant to
 the additive constant), then minimize NLL of the true label over temperature
 T with scipy.optimize.minimize_scalar (bounded). Output: calibration.json
 with {"temperatures": {<group>: T, ...}} — serve.py picks it up
-automatically from the package directory (or $SYSONE_CALIBRATION). Ships
+automatically from the package directory (or $QUORUM_CALIBRATION). Ships
 with no file => T=1 everywhere.
 
 Usage:
-    python3 -m sysone.calibrate labeled.jsonl [-o calibration.json]
+    python3 -m quorum.calibrate labeled.jsonl [-o calibration.json]
 """
 from __future__ import annotations
 

@@ -3,7 +3,7 @@ import math
 
 import pytest
 
-from sysone import core
+from quorum import core
 
 
 # ---------- validate_request ----------

@@ -1,7 +1,7 @@
 """gate_client — backend-agnostic jev client for qwen-code hooks.
 
 One call site, two backends, interchangeable:
-  JEV_BACKEND=local  (default) → sysone shim on :8017 (4B judgment gate, free,
+  JEV_BACKEND=local  (default) → quorum shim on :8017 (4B judgment gate, free,
                         private, safe for client code)
   JEV_BACKEND=cloud          → api.typesafe.ai jev-latest (calibrated, metered,
                         INTERNAL USE ONLY — never client code/data)
@@ -59,7 +59,7 @@ def _extract_choice(answer: dict):
 
 
 def ask(state, questions, caller="hook", backend=None, reasoning=False):
-    """state: str or dict (dict → json.dumps). questions: sysone-format dict.
+    """state: str or dict (dict → json.dumps). questions: quorum-format dict.
     reasoning=True asks the LOCAL shim for chain-of-thought (bounded rationale
     before each verdict) — ~cloud-grade noul accuracy at ~3x latency; use for
     decisions that actually block. No effect on the cloud backend.

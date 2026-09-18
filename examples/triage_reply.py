@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""triage_reply.py — outbound-sales reply triage against the local sysone API.
+"""triage_reply.py — outbound-sales reply triage against the local quorum API.
 
-Asks THREE questions in ONE request to sysone (127.0.0.1:8017) over the
+Asks THREE questions in ONE request to quorum (127.0.0.1:8017) over the
 reply email:
   Choice: intent (interested / not_now / not_a_fit / out_of_office / unsubscribe)
   Score:  heat 0-3 with concrete level descriptions
@@ -12,7 +12,7 @@ Usage:
     python3 triage_reply.py "email text here"      # triage one reply
     cat email.txt | python3 triage_reply.py        # triage from stdin
 
-Endpoint override: SYSONE_URL (default http://127.0.0.1:8017). Stdlib only.
+Endpoint override: QUORUM_URL (default http://127.0.0.1:8017). Stdlib only.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ import os
 import sys
 import urllib.request
 
-SYSONE_URL = os.environ.get("SYSONE_URL", "http://127.0.0.1:8017")
+QUORUM_URL = os.environ.get("QUORUM_URL", "http://127.0.0.1:8017")
 
 SAMPLES = [
     (
@@ -79,7 +79,7 @@ QUESTIONS = {
 def triage(email_text: str) -> dict:
     body = {"state": {"reply_email": email_text}, "questions": QUESTIONS}
     req = urllib.request.Request(
-        SYSONE_URL.rstrip("/") + "/v1/systemone",
+        QUORUM_URL.rstrip("/") + "/v1/systemone",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",

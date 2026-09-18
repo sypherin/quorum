@@ -1,4 +1,4 @@
-"""sysone core — pure logic for the local SystemOne shim.
+"""quorum core — pure logic for the local quorum shim.
 
 Maps a typesafe-style request {state, questions{noul|choice|score}} onto a
 constrained llama-server call and extracts typed answers + probabilities
@@ -79,7 +79,7 @@ def build_schema(questions: dict, cot: bool = False) -> dict:
             props[qid] = {"type": "integer", "minimum": 0, "maximum": len(q["criteria"]) - 1}
         required.append(qid)
     return {
-        "name": "sysone_answers",
+        "name": "quorum_answers",
         "strict": True,
         "schema": {
             "type": "object",
@@ -132,9 +132,9 @@ def build_messages(state: str, questions: dict, cot: bool = False) -> list[dict]
 def load_temperatures() -> dict[str, float]:
     """Per-question-type temperatures from calibration.json.
 
-    Path: $SYSONE_CALIBRATION, else calibration.json next to this module.
+    Path: $QUORUM_CALIBRATION, else calibration.json next to this module.
     Missing file => {} => T=1 passthrough (uncalibrated)."""
-    path = os.environ.get("SYSONE_CALIBRATION")
+    path = os.environ.get("QUORUM_CALIBRATION")
     path = Path(path) if path else Path(__file__).with_name("calibration.json")
     if not path.exists():
         return {}

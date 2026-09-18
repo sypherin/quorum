@@ -1,17 +1,17 @@
-"""sysone serve — bare-ASGI shim exposing POST /v1/systemone backed by a
+"""quorum serve — bare-ASGI shim exposing POST /v1/systemone backed by a
 local llama-server (default: judgment-gate 4B on 127.0.0.1:8005).
 
 No FastAPI dependency. Run:
-  SYSONE_PORT=8017 uvicorn sysone.serve:app --host 127.0.0.1 --port 8017
+  QUORUM_PORT=8017 uvicorn quorum.serve:app --host 127.0.0.1 --port 8017
 
 Calibration: per-question-type temperatures from calibration.json next to
-the package (or $SYSONE_CALIBRATION) are applied to logprobs before softmax.
-No file => T=1 passthrough. Fit with `python3 -m sysone.calibrate`.
+the package (or $QUORUM_CALIBRATION) are applied to logprobs before softmax.
+No file => T=1 passthrough. Fit with `python3 -m quorum.calibrate`.
 
 Logging: every successful judgment appends one JSONL record (state,
-questions, answers, label: null) to $SYSONE_LOG (default: log/judgments.jsonl
-under the repo root; SYSONE_LOG=off disables). Best-effort — never fails a
-request. Records are the raw material for sysone.calibrate once labeled.
+questions, answers, label: null) to $QUORUM_LOG (default: log/judgments.jsonl
+under the repo root; QUORUM_LOG=off disables). Best-effort — never fails a
+request. Records are the raw material for quorum.calibrate once labeled.
 """
 from __future__ import annotations
 
@@ -26,13 +26,13 @@ import httpx
 
 from . import core
 
-UPSTREAM = os.environ.get("SYSONE_UPSTREAM", "http://127.0.0.1:8005")
-MODEL_ALIAS = os.environ.get("SYSONE_MODEL_ALIAS", "sysone-local-4b")
-# Chain-of-thought default: SYSONE_COT=1 turns it on globally; a request's
+UPSTREAM = os.environ.get("QUORUM_UPSTREAM", "http://127.0.0.1:8005")
+MODEL_ALIAS = os.environ.get("QUORUM_MODEL_ALIAS", "quorum-local-4b")
+# Chain-of-thought default: QUORUM_COT=1 turns it on globally; a request's
 # "reasoning": true|false always overrides. Off by default => zero change for
 # existing callers (direct single-pass, ~1s). CoT ~3x slower but ~cloud-grade noul.
-COT_DEFAULT = os.environ.get("SYSONE_COT", "").strip().lower() in ("1", "true", "yes", "on")
-MAX_STATE_CHARS = int(os.environ.get("SYSONE_MAX_STATE_CHARS", "60000"))
+COT_DEFAULT = os.environ.get("QUORUM_COT", "").strip().lower() in ("1", "true", "yes", "on")
+MAX_STATE_CHARS = int(os.environ.get("QUORUM_MAX_STATE_CHARS", "60000"))
 DEFAULT_LOG = Path(__file__).resolve().parent.parent / "log" / "judgments.jsonl"
 
 
@@ -73,7 +73,7 @@ async def call_upstream(state: str, questions: dict, cot: bool = False) -> dict:
 
 
 def _log_path() -> Path | None:
-    raw = os.environ.get("SYSONE_LOG")
+    raw = os.environ.get("QUORUM_LOG")
     if raw is None:
         return DEFAULT_LOG
     if raw.lower() in ("off", "0", "none", ""):
@@ -86,7 +86,7 @@ def log_record(state: str, questions: dict, answers: dict) -> None:
 
     Never raises: logging must not break the judgment path. Records carry
     state + questions + raw answers so outcomes can be labeled later and fed
-    to sysone.calibrate.
+    to quorum.calibrate.
     """
     path = _log_path()
     if path is None:

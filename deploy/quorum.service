@@ -1,0 +1,16 @@
+[Unit]
+Description=quorum — local judgment shim + calibration harness (ASGI :8017 -> judgment-gate :8005)
+After=judgment-gate.service
+Wants=judgment-gate.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/awpapa/dev/quorum
+Environment=QUORUM_UPSTREAM=http://127.0.0.1:8005
+Environment=QUORUM_MODEL_ALIAS=quorum-local-4b
+ExecStart=/home/awpapa/.local/bin/uvicorn quorum.serve:app --host 127.0.0.1 --port 8017
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

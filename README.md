@@ -1,28 +1,64 @@
-# sysone — local TypeSafe SystemOne shim
+# quorum
 
-Drop-in-ish replication of `POST https://api.typesafe.ai/v1/systemone` running on
-the box's own llama-server (default: the 4B judgment-gate on 127.0.0.1:8005).
+A local, private re-implementation of the [TypeSafe AI](https://typesafe.ai)
+SystemOne request contract -- one state, N typed judgment questions,
+probabilities back -- running on your own hardware, plus a calibration harness
+that turns logged judgments into a training-adjacent corpus.
 
-Same request shape (state + questions) and same answer shapes for the three
-primitives (noul / choice / score), with probabilities extracted from
-llama-server token logprobs. No data leaves the machine.
+Point it at any llama-server-compatible endpoint. It answers `noul`, `choice`
+and `score` questions by constraining the model's output and reading token
+logprobs, so a "probability" falls out of the decode instead of being parsed
+out of prose. No account, no billing, nothing leaves the machine.
 
-## Differences vs typesafe (honest)
+## Why Jev, and why this exists
 
-- probabilities are constrained-LLM logprobs, **not** trained calibration —
-  treat them as ranking signal, not ground truth
-- `confidence` = winning option's probability (concentration proxy)
-- no account, no billing; usage/latency reported per call
+[Jev](https://typesafe.ai) is TypeSafe's System One model: small, fast
+language-model judgments with *trained* calibration, trained with RLCD against
+human judgment references. It's the idea that made this project worth doing --
+judgments as typed primitives (`noul` / `choice` / `score`) that code can
+combine, rather than prompt-and-parse string guessing.
 
-## Run
+We ran Jev in production for months, and hit three walls that are fine for a
+demo but not for an always-on gate:
+
+- **cost per call.** Our judgment hooks fire on every prompt, every file diff,
+  every completion -- thousands of small calls a week. Per-call pricing turns a
+  guardrail into a meter.
+- **privacy.** The states we judge are unreleased code diffs, client names,
+  draft emails. They shouldn't transit an API to be graded.
+- **no knob on the model itself.** When we measured the local-vs-cloud gap on a
+  trace-classification benchmark, what we needed was to *retrain on our own
+  labeled judgments* -- something a hosted model can't offer.
+
+So: keep the wire contract, swap the brain. `quorum` speaks the same
+`POST /v1/systemone` shape, runs against a local 4B model, and adds the piece
+the hosted API doesn't give you -- a calibration loop over your own corpus.
+
+The name: a *quorum* is multiple independent judgments called over one state.
+That's literally what each request does.
+
+## What it is / isn't
+
+- **Is:** a drop-in ASGI shim (`serve.py`) over any llama-server-compatible
+  upstream, with structured-output decoding, an opt-in chain-of-thought mode,
+  per-question temperature calibration, and a client (`gate_client.ask`) that
+  logs every call.
+- **Is not:** a trained System One model. The probabilities are constrained-LLM
+  logprobs -- good for *ranking* ("diff A riskier than that one"), not certified
+  calibrated numbers. `confidence` is the winning option's probability, a
+  concentration proxy. This is the honest gap vs Jev and we say so up front.
+  `quorum.calibrate` narrows the gap; it does not erase it.
+
+## Quick start
 
 ```bash
-cd ~/dev/sysone
-SYSONE_PORT=8017 uvicorn sysone.serve:app --host 127.0.0.1 --port 8017
-# optional: SYSONE_UPSTREAM=http://127.0.0.1:8005 SYSONE_MODEL_ALIAS=...
+# serve on :8017 against a llama-server chat-completions upstream on :8005
+uvicorn quorum.serve:app --host 127.0.0.1 --port 8017
+# env: QUORUM_UPSTREAM, QUORUM_MODEL_ALIAS, QUORUM_PORT, QUORUM_COT,
+#      QUORUM_LOG, QUORUM_CALIBRATION, QUORUM_MAX_STATE_CHARS
 ```
 
-## Call
+One request, three primitives:
 
 ```bash
 curl -s 127.0.0.1:8017/v1/systemone -H 'content-type: application/json' -d '{
@@ -37,8 +73,59 @@ curl -s 127.0.0.1:8017/v1/systemone -H 'content-type: application/json' -d '{
 }'
 ```
 
+From Python (stdlib only):
+
+```python
+from quorum.gate_client import ask
+r = ask({"review_type": "outbound email", "situation": "...draft text..."},
+        {"regrettable": {"type": "noul", "instructions": "Would we regret sending this?"}},
+        caller="my-hook")
+print(r["probs"]["regrettable"])   # float 0..1
+```
+
+## The calibration-corpus story
+
+This is the part the hosted API can't do, and the reason the project exists
+locally.
+
+Every call through `gate_client` is appended to a JSONL log (`QUORUM_LOG`):
+state, questions, probabilities, latency, caller. Run long enough and the log
+becomes what an API bill never is -- **a labeled record of the judgments your
+system actually made**, with outcomes you can fill in later.
+
+Two things grow out of that corpus:
+
+1. **Runtime calibration.** `python3 -m quorum.calibrate labeled.jsonl` fits a
+   per-question-type temperature (NLL minimisation over the logged probs) and
+   writes `calibration.json`, which `serve.py` picks up automatically. Raw
+   logprob → tuned logprob, no retraining.
+2. **A fine-tuning set.** Our own judgment gate -- a Qwen3-4B LoRA trained on
+   647 reviewed situation→verdict pairs mined from months of agent logs --
+   follows the same loop: log judgments, label the ones that mattered, train,
+   probe, ship. The corpus *is* the product; the weights are just its current
+   compiled form ([AltronisSG on Hugging Face](https://huggingface.co/AltronisSG),
+   Apache-2.0).
+
+The loop, end to end:
+
+```
+agent work → hooks ask quorum → judgments logged → humans label what mattered
+   → calibrate (T per question type)  →  better probabilities today
+   → fine-tune (LoRA on the labeled set) → better base model tomorrow
+```
+
 ## Tests
 
 ```bash
-cd ~/dev/sysone && python -m pytest tests/ -q
+python -m pytest tests/ -q
 ```
+
+## Credits & license
+
+- The System One framing, the `noul`/`choice`/`score` primitives, and the
+  goal of calibrated language-model judgment are TypeSafe AI's -- see
+  [typesafe.ai](https://typesafe.ai) and their Jev / RLCD work. "SystemOne"
+  and "Jev" are their concepts; this project is an independent local
+  re-implementation of the request contract, not their software.
+- Base model served here: Qwen3-4B (Apache-2.0) via llama.cpp/llama-server.
+- quorum code: Apache-2.0 -- see [LICENSE](LICENSE).
