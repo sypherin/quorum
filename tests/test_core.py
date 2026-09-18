@@ -52,6 +52,57 @@ def test_schema_enums_in_order():
     assert set(schema["schema"]["required"]) == set(qs)
 
 
+# ---------- chain-of-thought mode (opt-in) ----------
+
+def test_cot_schema_interleaves_bounded_reasoning_before_answers():
+    qs = {
+        "urgency": {"type": "noul", "instructions": "urgent?"},
+        "team": {"type": "choice", "instructions": "route", "criteria": {"billing": "b", "tech": "t"}},
+    }
+    schema = core.build_schema(qs, cot=True)
+    props = schema["schema"]["properties"]
+    # a bounded reasoning field exists per question
+    assert props["urgency__why"]["type"] == "string"
+    assert props["urgency__why"]["maxLength"] == core.REASON_MAXLEN
+    assert props["team__why"]["maxLength"] == core.REASON_MAXLEN
+    # answer fields are unchanged (extraction still finds them)
+    assert props["urgency"]["enum"] == ["yes", "no"]
+    assert props["team"]["enum"] == ["billing", "tech"]
+    # order: each '__why' comes immediately BEFORE its answer (model reasons then commits)
+    req = schema["schema"]["required"]
+    assert req.index("urgency__why") < req.index("urgency")
+    assert req.index("team__why") < req.index("team")
+
+
+def test_cot_off_is_byte_identical_to_default():
+    qs = {"a": {"type": "noul", "instructions": "x"}}
+    assert core.build_schema(qs, cot=False) == core.build_schema(qs)
+    assert "__why" not in json.dumps(core.build_schema(qs))
+    assert core.build_messages("s", qs, cot=False) == core.build_messages("s", qs)
+
+
+def test_cot_system_prompt_permits_reasoning_only_in_why():
+    qs = {"a": {"type": "noul", "instructions": "x"}}
+    sysmsg = core.build_messages("s", qs, cot=True)[0]["content"]
+    assert "__why" in sysmsg
+    # default prompt forbids reasoning; CoT prompt must not
+    assert "do not reason" not in sysmsg.lower()
+
+
+def test_cot_answer_key_not_shadowed_by_why_key_on_rfind():
+    # '"a__why":' must NOT satisfy a search for '"a":' — the value token walk
+    # relies on the answer key being findable and last
+    stream = [
+        _lp('{"a__why":"', -0.001, []),
+        _lp("brief reason", -0.01, []),
+        _lp('","a":"', -0.001, []),
+        _lp("yes", -0.02, [("yes", math.log(0.9)), ("no", math.log(0.1))]),
+    ]
+    idx = core.find_value_token(stream, "a")
+    p = core.probs_at_position(stream, idx, ["yes", "no"])
+    assert p == {"yes": pytest.approx(0.9), "no": pytest.approx(0.1)}
+
+
 # ---------- logprob extraction ----------
 
 def _lp(token, logprob, tops):
@@ -127,3 +178,56 @@ def test_pretty_printed_json_spacer_tokens():
     out = core.extract_answers({"team": "billing"}, qs, stream)["team"]
     assert out["probabilities"] == {"billing": pytest.approx(0.9), "technical": pytest.approx(0.1)}
     assert out["confidence"] == pytest.approx(0.9)
+
+
+# ---------- cloud-Jev contract regressions (2026-09-17 review) ----------
+
+def test_noul_field_is_always_p_yes():
+    # model clearly answers "no" — cloud Jev's noul field is P(yes), i.e. LOW
+    stream = [
+        _lp('{"wants_meeting":"', -0.001, []),
+        _lp('no', -0.05, [("no", math.log(0.95)), ("yes", math.log(0.05))]),
+    ]
+    qs = {"wants_meeting": {"type": "noul", "instructions": "wants a meeting?"}}
+    out = core.extract_answers({"wants_meeting": "no"}, qs, stream)["wants_meeting"]
+    assert out["noul"] == pytest.approx(0.05)
+    assert out["probabilities"]["no"] == pytest.approx(0.95)
+
+
+def test_noul_criteria_reach_the_prompt():
+    qs = {"safety": {"type": "noul", "instructions": "risky?",
+                     "criteria": {"yes": "creates risk of data loss",
+                                  "no": "no such risk"}}}
+    msgs = core.build_messages("state text", qs)
+    user = msgs[1]["content"]
+    assert "creates risk of data loss" in user
+    assert "no such risk" in user
+
+
+def test_ambiguous_prefix_token_not_misattributed():
+    # token 'not' is the start of BOTH options — its logprob must not be
+    # assigned to either; with no other signal the position yields nothing
+    stream = [
+        _lp('{"intent":"', -0.001, []),
+        _lp('not', -0.1, [("not", math.log(0.9)), ("interested", math.log(0.1))]),
+        _lp('_now', -0.01, [("_now", -0.01)]),
+    ]
+    qs = {"intent": {"type": "choice", "instructions": "intent?",
+                     "criteria": {"interested": "i", "not_now": "n", "not_a_fit": "f"}}}
+    out = core.extract_answers({"intent": "not_now"}, qs, stream)["intent"]
+    # no unambiguous signal anywhere near the value slot => no distribution,
+    # rather than a wrongly-attributed one
+    assert out["probabilities"] is None
+    assert out["choice"] == "not_now"
+
+
+def test_unambiguous_prefix_token_still_matches():
+    # ' bill' is a prefix of only one option — keep the partial-token tolerance
+    stream = [
+        _lp('{"team":"', -0.001, []),
+        _lp(' bill', -0.02, [(" bill", math.log(0.8)), ("technical", math.log(0.2))]),
+    ]
+    qs = {"team": {"type": "choice", "instructions": "route",
+                   "criteria": {"billing": "b", "technical": "t"}}}
+    out = core.extract_answers({"team": "billing"}, qs, stream)["team"]
+    assert out["probabilities"]["billing"] == pytest.approx(0.8)

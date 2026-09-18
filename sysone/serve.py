@@ -28,6 +28,10 @@ from . import core
 
 UPSTREAM = os.environ.get("SYSONE_UPSTREAM", "http://127.0.0.1:8005")
 MODEL_ALIAS = os.environ.get("SYSONE_MODEL_ALIAS", "sysone-local-4b")
+# Chain-of-thought default: SYSONE_COT=1 turns it on globally; a request's
+# "reasoning": true|false always overrides. Off by default => zero change for
+# existing callers (direct single-pass, ~1s). CoT ~3x slower but ~cloud-grade noul.
+COT_DEFAULT = os.environ.get("SYSONE_COT", "").strip().lower() in ("1", "true", "yes", "on")
 MAX_STATE_CHARS = int(os.environ.get("SYSONE_MAX_STATE_CHARS", "60000"))
 DEFAULT_LOG = Path(__file__).resolve().parent.parent / "log" / "judgments.jsonl"
 
@@ -49,13 +53,15 @@ async def _send_response(send, status: int, body: bytes):
     await send({"type": "http.response.body", "body": body})
 
 
-async def call_upstream(state: str, questions: dict) -> dict:
-    messages = core.build_messages(state, questions)
-    schema = core.build_schema(questions)
+async def call_upstream(state: str, questions: dict, cot: bool = False) -> dict:
+    messages = core.build_messages(state, questions, cot=cot)
+    schema = core.build_schema(questions, cot=cot)
+    # CoT needs headroom for the bounded rationale per question; direct mode stays lean.
+    max_tokens = min(1024, 96 + 128 * len(questions)) if cot else 256
     payload = {
         "messages": messages,
         "temperature": 0,
-        "max_tokens": 256,
+        "max_tokens": max_tokens,
         "response_format": {"type": "json_schema", "json_schema": schema},
         "logprobs": True,
         "top_logprobs": 12,
@@ -108,9 +114,12 @@ async def handle_systemone(body: dict) -> tuple[int, dict]:
         return 400, {"detail": str(e)}
     if len(state) > MAX_STATE_CHARS:
         return 400, {"detail": f"state exceeds {MAX_STATE_CHARS} chars"}
+    # opt-in reasoning: request "reasoning" (or "cot") wins over the env default
+    flag = body.get("reasoning", body.get("cot"))
+    cot = bool(flag) if flag is not None else COT_DEFAULT
     t0 = time.time()
     try:
-        resp = await call_upstream(state, questions)
+        resp = await call_upstream(state, questions, cot=cot)
     except Exception as e:  # noqa: BLE001 — surface every upstream failure
         return 502, {"detail": f"upstream error: {e}"}
     try:
@@ -135,6 +144,7 @@ async def handle_systemone(body: dict) -> tuple[int, dict]:
         },
         "latency_ms": int((time.time() - t0) * 1000),
         "prob_method": "logprobs" if logprobs else "unavailable",
+        "mode": "cot" if cot else "direct",
     }
     log_record(state, questions, answers)
     return 200, out

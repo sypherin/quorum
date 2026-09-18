@@ -58,13 +58,18 @@ def _extract_choice(answer: dict):
     return None
 
 
-def ask(state, questions, caller="hook", backend=None):
+def ask(state, questions, caller="hook", backend=None, reasoning=False):
     """state: str or dict (dict → json.dumps). questions: sysone-format dict.
+    reasoning=True asks the LOCAL shim for chain-of-thought (bounded rationale
+    before each verdict) — ~cloud-grade noul accuracy at ~3x latency; use for
+    decisions that actually block. No effect on the cloud backend.
     Returns {"backend", "probs": {qid: float}, "latency_ms"} or {"error"}."""
     backend = backend or os.environ.get("JEV_BACKEND", "local")
     if isinstance(state, dict):
         state = json.dumps(state)
     body = {"state": state, "questions": questions}
+    if reasoning and backend != "cloud":
+        body["reasoning"] = True
     headers = {"content-type": "application/json"}
     if backend == "cloud":
         k = _cloud_key()

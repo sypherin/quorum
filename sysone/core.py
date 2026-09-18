@@ -49,10 +49,27 @@ def validate_request(body: dict) -> tuple[Any, dict]:
     return state, questions
 
 
-def build_schema(questions: dict) -> dict:
-    """JSON schema forcing exactly one answer field per question."""
+# Chain-of-thought (opt-in): a bounded reasoning field emitted BEFORE each answer.
+# The 4B judges far better with a rationale, but the field MUST be length-capped —
+# an unbounded string overruns max_tokens and truncates the JSON before the answer
+# token is ever emitted (measured 2026-09-18: bounded CoT lifts noul 57.7% -> 94.2%).
+REASON_SUFFIX = "__why"
+REASON_MAXLEN = 200  # chars (~one 15-word sentence); backstop to the prompt instruction
+
+
+def build_schema(questions: dict, cot: bool = False) -> dict:
+    """JSON schema forcing exactly one answer field per question.
+
+    cot=True interleaves a bounded '<id>__why' string before each answer, so the
+    model reasons then commits. Answer keys/positions are unchanged, so logprob
+    extraction (which reads at the answer token) works identically."""
     props: dict[str, Any] = {}
+    required: list[str] = []
     for qid, q in questions.items():
+        if cot:
+            wkey = qid + REASON_SUFFIX
+            props[wkey] = {"type": "string", "maxLength": REASON_MAXLEN}
+            required.append(wkey)
         t = q["type"]
         if t == "noul":
             props[qid] = {"type": "string", "enum": ["yes", "no"]}
@@ -60,25 +77,35 @@ def build_schema(questions: dict) -> dict:
             props[qid] = {"type": "string", "enum": list(q["criteria"].keys())}
         else:
             props[qid] = {"type": "integer", "minimum": 0, "maximum": len(q["criteria"]) - 1}
+        required.append(qid)
     return {
         "name": "sysone_answers",
         "strict": True,
         "schema": {
             "type": "object",
             "properties": props,
-            "required": list(props.keys()),
+            "required": required,
             "additionalProperties": False,
         },
     }
 
 
-def build_messages(state: str, questions: dict) -> list[dict]:
-    sys = (
-        "You are a judgment engine. You do not explain, do not reason in the answer, "
-        "and never add fields. For each question, judge the state and output the single "
-        "required answer value: yes/no for noul questions, the option key for choice "
-        "questions, the integer level for score questions."
-    )
+def build_messages(state: str, questions: dict, cot: bool = False) -> list[dict]:
+    if cot:
+        sys = (
+            "You are a careful judgment engine. For each question you are given a reasoning "
+            "field named '<id>__why' and an answer field named '<id>'. In each '<id>__why' put "
+            "ONE short sentence (max 15 words) weighing the evidence, then put the required value "
+            "in '<id>': yes/no for noul, the option key for choice, the integer level for score. "
+            "Reason ONLY inside the '__why' fields, and never add any other field."
+        )
+    else:
+        sys = (
+            "You are a judgment engine. You do not explain, do not reason in the answer, "
+            "and never add fields. For each question, judge the state and output the single "
+            "required answer value: yes/no for noul questions, the option key for choice "
+            "questions, the integer level for score questions."
+        )
     qdef = {}
     for qid, q in questions.items():
         t = q["type"]
@@ -89,6 +116,10 @@ def build_messages(state: str, questions: dict) -> list[dict]:
             d["levels"] = {str(i): v for i, v in enumerate(q["criteria"])}
         else:
             d["answer"] = "yes or no"
+            if q.get("criteria"):
+                # noul criteria (yes/no definitions) carry real meaning — pass
+                # them through instead of dropping them silently.
+                d["criteria"] = q["criteria"]
         qdef[qid] = d
     user = "STATE:\n" + state + "\n\nQUESTIONS (answer every key, keys are verbatim):\n" + json.dumps(qdef, ensure_ascii=False)
     return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
@@ -115,10 +146,19 @@ def temperature_for(kind: str, temps: dict[str, float]) -> float:
     return temps.get(kind, temps.get("default", 1.0))
 
 
-def _match_candidate(tok_text: str, cand: str) -> bool:
-    """Token is the start of candidate value (token may carry quotes/punct)."""
+def _candidate_matches(tok_text: str, candidates: list[str]) -> list[str]:
+    """Candidates a token could be the start of (token may carry quotes/punct).
+
+    Exact match wins outright. Prefix matches are only usable when exactly one
+    candidate matches — a token like "not" is the start of both "not_now" and
+    "not_a_fit", and attributing its logprob to either would be wrong."""
     t = tok_text.strip().strip('"').lstrip()
-    return cand.startswith(t[: len(cand)]) and len(t) > 0
+    if not t:
+        return []
+    exact = [c for c in candidates if c == t]
+    if exact:
+        return exact
+    return [c for c in candidates if c.startswith(t[: len(c)])]
 
 
 def probs_at_position(logprobs: list, value_token_index: int, candidates: list[str],
@@ -139,10 +179,12 @@ def probs_at_position(logprobs: list, value_token_index: int, candidates: list[s
         lp = tp.get("logprob")
         if lp is None:
             continue
-        for cand in candidates:
-            if cand not in scores and _match_candidate(tok, cand):
-                scores[cand] = math.exp(lp / temperature)
-                break
+        matches = _candidate_matches(tok, candidates)
+        if len(matches) != 1:
+            continue  # no match, or ambiguous prefix — never misattribute
+        cand = matches[0]
+        if cand not in scores:
+            scores[cand] = math.exp(lp / temperature)
     if len(scores) < 2:  # need at least a competing signal to be meaningful
         return None
     total = sum(scores.values())
@@ -204,7 +246,9 @@ def extract_answers(raw_json: dict, questions: dict, logprobs: list | None,
         lp = logprobs or []
         if t == "noul":
             p = probs_for_key(lp, qid, ["yes", "no"], temperature=temp)
-            ans: dict[str, Any] = {"type": "noul", "noul": (p or {}).get(val, None if p is None else 0.0)}
+            # Cloud Jev contract: the noul field is always P(yes), no matter
+            # which answer the model picked. (Was P(chosen) — wrong for "no".)
+            ans: dict[str, Any] = {"type": "noul", "noul": p["yes"] if p is not None else None}
             if p is not None:
                 ans["probabilities"] = p
                 ans["confidence"] = max(p.values())
