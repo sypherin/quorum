@@ -10,3 +10,8 @@ log/
 *.log
 .env
 .DS_Store
+
+# training artifacts + corpora with real session content — never commit (public repo)
+bench/lambda-out/
+bench/*.jsonl
+bench/calibration_teacher.json
