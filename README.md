@@ -49,6 +49,21 @@ That's literally what each request does.
   concentration proxy. This is the honest gap vs Jev and we say so up front.
   `quorum.calibrate` narrows the gap; it does not erase it.
 
+## Demo: a local 4B clears Super Mario Bros 1-1
+
+![the local 4B clearing World 1-1](docs/media/mario-1-1-quorum-local-4b.gif)
+
+Every decision in that run is a `noul` question answered by the 4B behind this shim
+([full video](docs/media/mario-1-1-quorum-local-4b.mp4), paused-emulator harness, not real time).
+
+Asked cloud Jev's single 5-way question, the same 4B answered `run_right` 22 times in a row
+and died at the first goomba. It cleared the level once the judgment was cut into plain yes/no
+questions, one per call, over a state written in words, with thresholds fitted against cloud
+Jev's logged decisions as the teacher. Every action in the video is the model's answers, with
+no code overrides. What a 4B can and cannot read is in [examples/mario](examples/mario/); the
+method and how to reuse it on other tasks is in
+[docs/judgment-decomposition.md](docs/judgment-decomposition.md).
+
 ## Quick start
 
 ```bash
@@ -131,7 +146,8 @@ agent work → hooks ask quorum → judgments logged → humans label what matte
 ## Tests
 
 ```bash
-python -m pytest tests/ -q
+python -m pytest tests/ -q              # the shim
+python -m pytest examples/mario -q      # the Mario example: state decoding and policy
 ```
 
 ## Credits & license
