@@ -93,13 +93,27 @@ state, questions, probabilities, latency, caller. Run long enough and the log
 becomes what an API bill never is -- **a labeled record of the judgments your
 system actually made**, with outcomes you can fill in later.
 
-Two things grow out of that corpus:
+Four things grow out of that corpus:
 
-1. **Runtime calibration.** `python3 -m quorum.calibrate labeled.jsonl` fits a
+1. **Measure the gap.** `python3 -m quorum.report` audits the log itself --
+   per-question Brier, log-loss, 10-bin ECE, a reliability table and a
+   confident-error list (high-prob calls that were wrong), with the
+   majority-class floor printed next to decision accuracy so a 95%-one-class
+   question doesn't look like a win. Borrowed from the kev/Jev eval harnesses:
+   score calibration, not just accuracy. Needs labels -- that's the next step.
+2. **Label what mattered.** `python3 -m quorum.label` walks the log
+   newest-first, one judgment per screen; Enter agrees with quorum, `n`
+   overrides per question. Verdicts merge into the log as a `labels` dict --
+   the bridge between "logged" and "calibratable".
+3. **Runtime calibration.** `python3 -m quorum.calibrate labeled.jsonl` fits a
    per-question-type temperature (NLL minimisation over the logged probs) and
    writes `calibration.json`, which `serve.py` picks up automatically. Raw
-   logprob → tuned logprob, no retraining.
-2. **A fine-tuning set.** Our own judgment gate -- a Qwen3-4B LoRA trained on
+   logprob → tuned logprob, no retraining. (`bench/fit_calibration.py` goes
+   further -- Platt maps fitted against the cloud-Jev teacher with 5-fold CV;
+   `bench/calibration_teacher.json` is the honest result: vs cloud probs,
+   ECE 0.23 → 0.13 fitted, but vs gold labels the local 4B still doesn't
+   separate classes on every task. That gap is what the corpus loop is for.)
+4. **A fine-tuning set.** Our own judgment gate -- a Qwen3-4B LoRA trained on
    647 reviewed situation→verdict pairs mined from months of agent logs --
    follows the same loop: log judgments, label the ones that mattered, train,
    probe, ship. The corpus *is* the product; the weights are just its current

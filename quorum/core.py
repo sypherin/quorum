@@ -249,6 +249,9 @@ def extract_answers(raw_json: dict, questions: dict, logprobs: list | None,
             # Cloud Jev contract: the noul field is always P(yes), no matter
             # which answer the model picked. (Was P(chosen) — wrong for "no".)
             ans: dict[str, Any] = {"type": "noul", "noul": p["yes"] if p is not None else None}
+            # Keep the model's committed answer too — P(yes) alone cannot
+            # reconstruct which side the schema forced (needed by quorum.report).
+            ans["answer"] = str(val).strip().lower()
             if p is not None:
                 ans["probabilities"] = p
                 ans["confidence"] = max(p.values())
