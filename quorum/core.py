@@ -146,27 +146,38 @@ def temperature_for(kind: str, temps: dict[str, float]) -> float:
     return temps.get(kind, temps.get("default", 1.0))
 
 
-def _candidate_matches(tok_text: str, candidates: list[str]) -> list[str]:
+def _candidate_matches(tok_text: str, candidates: list[str], prefer: str | None = None) -> list[str]:
     """Candidates a token could be the start of (token may carry quotes/punct).
 
-    Exact match wins outright. Prefix matches are only usable when exactly one
-    candidate matches — a token like "not" is the start of both "not_now" and
-    "not_a_fit", and attributing its logprob to either would be wrong."""
+    Exact match wins outright. A prefix that fits exactly one candidate is used.
+    A prefix that fits SEVERAL candidates (e.g. "run" starts both "run_right" and
+    "run_left") is ambiguous: on its own it is dropped, because attributing its
+    logprob to any one of them would be wrong. But when `prefer` (the answer the
+    model actually committed to) is among those candidates, the ambiguity is
+    resolved — the token's mass went to the continuation the model emitted, so it
+    is credited to `prefer`. This is exact when P(suffix | prefix) ~= 1, which is
+    the norm for an enum decoded at temperature 0; for shared-prefix options it is
+    the difference between the chosen option reading its true probability and
+    reading 0.0."""
     t = tok_text.strip().strip('"').lstrip()
     if not t:
         return []
     exact = [c for c in candidates if c == t]
     if exact:
         return exact
-    return [c for c in candidates if c.startswith(t[: len(c)])]
+    pref = [c for c in candidates if c.startswith(t[: len(c)])]
+    if len(pref) > 1 and prefer in pref:
+        return [prefer]
+    return pref
 
 
 def probs_at_position(logprobs: list, value_token_index: int, candidates: list[str],
-                      temperature: float = 1.0) -> dict[str, float] | None:
+                      temperature: float = 1.0, prefer: str | None = None) -> dict[str, float] | None:
     """Distribution over candidates from top_logprobs at the value's token position.
 
     `temperature` scales logprobs before normalization (softmax(lp / T));
-    T=1 is a passthrough."""
+    T=1 is a passthrough. `prefer` (the committed answer) resolves an otherwise
+    ambiguous shared-prefix token in favour of the option the model emitted."""
     if value_token_index is None or value_token_index >= len(logprobs):
         return None
     entry = logprobs[value_token_index]
@@ -179,9 +190,9 @@ def probs_at_position(logprobs: list, value_token_index: int, candidates: list[s
         lp = tp.get("logprob")
         if lp is None:
             continue
-        matches = _candidate_matches(tok, candidates)
+        matches = _candidate_matches(tok, candidates, prefer=prefer)
         if len(matches) != 1:
-            continue  # no match, or ambiguous prefix — never misattribute
+            continue  # no match, or ambiguous prefix we cannot resolve — never misattribute
         cand = matches[0]
         if cand not in scores:
             scores[cand] = math.exp(lp / temperature)
@@ -194,17 +205,18 @@ def probs_at_position(logprobs: list, value_token_index: int, candidates: list[s
 
 
 def probs_for_key(logprobs: list, key: str, candidates: list[str], max_walk: int = 4,
-                  temperature: float = 1.0) -> dict[str, float] | None:
+                  temperature: float = 1.0, prefer: str | None = None) -> dict[str, float] | None:
     """Distribution over candidates at the value position for `key`.
 
     The JSON emitter may put spacer tokens (' \"', ' ') between the colon and
     the value, and the value may be quoted/merged — walk forward from the key
-    and accept the first position that distinguishes >=2 candidates."""
+    and accept the first position that distinguishes >=2 candidates. `prefer`
+    (the committed answer) resolves shared-prefix ambiguity toward it."""
     start = find_value_token(logprobs, key)
     if start is None:
         return None
     for i in range(start, min(start + max_walk, len(logprobs))):
-        p = probs_at_position(logprobs, i, candidates, temperature)
+        p = probs_at_position(logprobs, i, candidates, temperature, prefer=prefer)
         if p is not None:
             return p
     return None
@@ -245,7 +257,8 @@ def extract_answers(raw_json: dict, questions: dict, logprobs: list | None,
             continue
         lp = logprobs or []
         if t == "noul":
-            p = probs_for_key(lp, qid, ["yes", "no"], temperature=temp)
+            p = probs_for_key(lp, qid, ["yes", "no"], temperature=temp,
+                              prefer=str(val).strip().lower())
             # Cloud Jev contract: the noul field is always P(yes), no matter
             # which answer the model picked. (Was P(chosen) — wrong for "no".)
             ans: dict[str, Any] = {"type": "noul", "noul": p["yes"] if p is not None else None}
@@ -260,7 +273,7 @@ def extract_answers(raw_json: dict, questions: dict, logprobs: list | None,
             answers[qid] = ans
         elif t == "choice":
             opts = list(q["criteria"].keys())
-            p = probs_for_key(lp, qid, opts, temperature=temp)
+            p = probs_for_key(lp, qid, opts, temperature=temp, prefer=str(val))
             ans = {"type": "choice", "choice": val}
             if p is not None:
                 ans["probabilities"] = p
@@ -272,7 +285,7 @@ def extract_answers(raw_json: dict, questions: dict, logprobs: list | None,
             levels = q["criteria"]
             idx = int(val)
             cands = [str(i) for i in range(len(levels))]
-            p = probs_for_key(lp, qid, cands, temperature=temp)
+            p = probs_for_key(lp, qid, cands, temperature=temp, prefer=str(idx))
             ans = {
                 "type": "score",
                 "score": float(idx),

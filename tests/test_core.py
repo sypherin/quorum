@@ -204,9 +204,10 @@ def test_noul_criteria_reach_the_prompt():
     assert "no such risk" in user
 
 
-def test_ambiguous_prefix_token_not_misattributed():
-    # token 'not' is the start of BOTH options — its logprob must not be
-    # assigned to either; with no other signal the position yields nothing
+def test_shared_prefix_token_credited_to_committed_answer():
+    # token 'not' starts BOTH not_now and not_a_fit. On its own it is ambiguous,
+    # but the model committed to not_now, so 'not' (its emitted first token)
+    # belongs to not_now — it must read not_now's real probability, not 0.0.
     stream = [
         _lp('{"intent":"', -0.001, []),
         _lp('not', -0.1, [("not", math.log(0.9)), ("interested", math.log(0.1))]),
@@ -215,10 +216,46 @@ def test_ambiguous_prefix_token_not_misattributed():
     qs = {"intent": {"type": "choice", "instructions": "intent?",
                      "criteria": {"interested": "i", "not_now": "n", "not_a_fit": "f"}}}
     out = core.extract_answers({"intent": "not_now"}, qs, stream)["intent"]
-    # no unambiguous signal anywhere near the value slot => no distribution,
-    # rather than a wrongly-attributed one
-    assert out["probabilities"] is None
     assert out["choice"] == "not_now"
+    assert out["probabilities"]["not_now"] == pytest.approx(0.9)
+    assert out["probabilities"]["interested"] == pytest.approx(0.1)
+    assert out["probabilities"]["not_a_fit"] == 0.0
+    assert out["confidence"] == pytest.approx(0.9)
+
+
+def test_shared_prefix_not_credited_to_uncommitted_option():
+    # the model committed to 'interested'; a competing ambiguous 'not' token must
+    # NOT be handed to not_now/not_a_fit (we only resolve toward the committed answer)
+    stream = [
+        _lp('{"intent":"', -0.001, []),
+        _lp('interested', -0.05, [("interested", math.log(0.7)), ("not", math.log(0.3))]),
+    ]
+    qs = {"intent": {"type": "choice", "instructions": "intent?",
+                     "criteria": {"interested": "i", "not_now": "n", "not_a_fit": "f"}}}
+    out = core.extract_answers({"intent": "interested"}, qs, stream)["intent"]
+    # 'interested' is the only resolvable candidate; 'not' stays ambiguous and is
+    # dropped, so there is no second competing candidate => no distribution.
+    assert out["choice"] == "interested"
+    assert out["probabilities"] is None
+
+
+def test_run_right_vs_run_left_multitoken_regression():
+    # the real Super-Mario failure: options run_right and run_left share the
+    # first token 'run'. Before the fix, run_right (the committed, argmax answer)
+    # read 0.0 while 'wait' took all the mass. It must now read ~1.0.
+    stream = [
+        _lp('{"action":', -0.001, []),
+        _lp(' "', -0.001, [('"', -9.0)]),
+        _lp('run', -0.54, [("run", -0.54), ("wait", -6.36), ("no", -0.89)]),
+        _lp('_right', -0.0, [("_right", -0.0), ("_left", -6.03)]),
+    ]
+    qs = {"action": {"type": "choice", "instructions": "move",
+                     "criteria": {"run_right": "r", "hop_right": "h", "jump_right": "j",
+                                  "wait": "w", "run_left": "l"}}}
+    out = core.extract_answers({"action": "run_right"}, qs, stream)["action"]
+    assert out["choice"] == "run_right"
+    assert out["probabilities"]["run_right"] > 0.9
+    assert out["confidence"] == pytest.approx(out["probabilities"]["run_right"])
 
 
 def test_unambiguous_prefix_token_still_matches():
