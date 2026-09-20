@@ -103,6 +103,33 @@ ACTIONS = {
 }
 
 
+class JudgmentCache:
+    """Memoised model judgments. Same (payload, questions) -> same answer under greedy decoding,
+    so replaying a stored answer is exact, not an approximation. Misses go to the model."""
+
+    def __init__(self, client, file):
+        self.client, self.file, self.mem, self.hits, self.misses = client, file, {}, 0, 0
+        if file.exists():
+            for l in open(file):
+                r = json.loads(l)
+                self.mem[r["k"]] = r["v"]
+
+    def __getattr__(self, name):                 # totals(), host, port, path... pass through
+        return getattr(self.client, name)
+
+    def ask(self, payload, questions):
+        k = json.dumps([payload, questions], sort_keys=True)
+        if k in self.mem:
+            self.hits += 1
+            return dict(self.mem[k], latency_ms=0, request_id="cache")
+        self.misses += 1
+        r = self.client.ask(payload, questions)
+        self.mem[k] = {"answers": r["answers"], "model": r["model"], "usage": r["usage"]}
+        with open(self.file, "a") as f:
+            f.write(json.dumps({"k": k, "v": self.mem[k]}) + "\n")
+        return r
+
+
 def state_text(state):
     """the JSON we send, one top-level key per line so it fits the HUD"""
     rows = [f' "{k}": {json.dumps(v, separators=(", ", ": "))}' for k, v in state.items()]
@@ -168,8 +195,11 @@ class Attempt:
         await page.evaluate("() => window.scrollTo(0, 0)")
         clip = await page.evaluate("w => __hud.mount(w)", HUD_WIDTH)
         if getattr(self.jev, "host", None):         # local quorum client: label the HUD truthfully
+            cached = isinstance(self.jev, JudgmentCache)
             await page.evaluate("b => __hud.brand(b[0], b[1], b[2])", [
-                "QUORUM · LOCAL SYSTEM ONE", f"POST {self.jev.host}:{self.jev.port}{self.jev.path}", "QUORUM"])
+                "QUORUM · LOCAL SYSTEM ONE" + (" · MEMOISED" if cached else ""),
+                ("judgment cache, miss -> " if cached else "") + f"POST {self.jev.host}:{self.jev.port}{self.jev.path}",
+                "QUORUM"])
         vw = await page.evaluate("() => document.documentElement.clientWidth")
         if clip["x"] + clip["width"] > vw:
             raise RuntimeError(f"HUD does not fit the viewport ({clip} vs {vw}px): the video would be cropped")
@@ -303,6 +333,86 @@ class Attempt:
                        "step_overshoot_frames": self.overshoot})
         return result
 
+    async def run_live(self, cadence=6, max_seconds=400):
+        """REAL-TIME: the emulator is never paused. A decision is requested from the current RAM,
+        the game keeps running while the model answers, and the buttons change when the answer
+        lands. `lag` = game frames that passed between reading the state and pressing."""
+        await self.boot()
+        page = self.page
+        await page.evaluate("() => { __smb.hold([3]); __smb.live(true); }")     # START, and let it run
+        result = {"attempt": self.num, "outcome": "time limit", "decisions": 0, "mode": "live"}
+        n = best_x = no_progress = 0
+        a_until = -1               # frame until which A stays held (hop 8 frames, jump 30)
+        dirs = []                  # direction/B buttons currently wanted
+        pending = None             # (task, frame_requested, x_requested)
+        lags, last_req, t0, f0 = [], -99, time.time(), None
+        start_level = None
+        while time.time() - t0 < max_seconds:
+            pk = await page.evaluate("() => __smb.peek()")
+            frame, ram = pk["frame"], bytes(pk["ram"])
+            f0 = frame if f0 is None else f0
+            s = S.snapshot(ram)
+            if start_level is None and s["mode"] == 1:
+                start_level = (s["world"], s["level"])
+            if S.cleared(s):
+                result["outcome"] = "cleared"
+                await page.evaluate("t => __hud.banner(t, false)", f'LEVEL {s["world"]}-{s["level"]} CLEARED LIVE · decisions {n}')
+                await page.evaluate("() => __smb.hold([])")
+                await page.wait_for_timeout(6000)
+                break
+            if S.dying(s):
+                result["outcome"] = f'died at x={s["x"]}' + (" (fell)" if s["yview"] > 1 else "")
+                await page.evaluate("t => __hud.banner(t, true)", f'MARIO DIED · x={s["x"]} · decision {n}')
+                await page.wait_for_timeout(2500)
+                break
+            if s["mode"] == 3 or (s["mode"] == 0 and n > 0):
+                result["outcome"] = "game over"
+                break
+            if not S.controllable(s):
+                if s["mode"] == 0:
+                    await page.evaluate("f => __smb.hold(f % 40 < 6 ? [3] : [])", frame)
+                await asyncio.sleep(0.01)
+                continue
+            if pending and pending[0].done():
+                task, f_req, x_req = pending
+                pending = None
+                state, kind, choice, ans, danger, r = task.result()
+                n += 1
+                buttons, hold_frames = ACTIONS[choice]
+                lag = frame - f_req
+                lags.append(lag)
+                dirs = [b for b in buttons if b != A]
+                if A in buttons and kind == "ground":
+                    if frame < a_until:                       # a fresh press needs a release edge first
+                        await page.evaluate("b => __smb.hold(b)", dirs)
+                    a_until = frame + hold_frames
+                self.log.write(json.dumps({
+                    "n": n, "frame": frame - f0, "x": s["x"], "x_at_request": x_req, "lag_frames": lag,
+                    "kind": kind, "state": state, "choice": choice, "probabilities": ans.get("probabilities"),
+                    "confidence": ans.get("confidence"), "nouls": ans.get("nouls"),
+                    "latency_ms": r["latency_ms"], "model": r["model"], "request_id": r["request_id"]}) + "\n")
+                self.log.flush()
+                print(f'#{n:<3} x={s["x"]:<5} {kind:<6} -> {choice:<10} lag={lag:>3}f {r["latency_ms"]:>4}ms', flush=True)
+                x = s["x"]
+                if x > best_x + 4:
+                    best_x, no_progress = x, 0
+                else:
+                    no_progress += 1
+            await page.evaluate("b => __smb.hold(b)", dirs + ([A] if frame < a_until else []))
+            if pending is None and frame - last_req >= cadence:
+                last_req = frame
+                pending = (asyncio.ensure_future(self.decide(ram, n + 1, no_progress)), frame, s["x"])
+            await asyncio.sleep(0.004)
+        if pending:
+            pending[0].cancel()
+        await page.evaluate("() => __smb.live(false)")
+        self.log.close()
+        lags.sort()
+        result.update({"decisions": n, "max_x": best_x, "wall_seconds": round(time.time() - t0, 1),
+                       "lag_frames_median": lags[len(lags) // 2] if lags else None,
+                       "lag_frames_p95": lags[int(len(lags) * 0.95)] if lags else None})
+        return result
+
     def encode(self, out):
         """frames -> mp4 at true game speed: each jpg is shown for the game frames it covers"""
         lines = []
@@ -329,6 +439,10 @@ async def main():
     ap.add_argument("--design", default="words", choices=sorted(P4.DESIGNS))
     ap.add_argument("--t-jump", type=float, default=0.42)
     ap.add_argument("--t-full", type=float, default=0.5)
+    ap.add_argument("--realtime", action="store_true",
+                    help="never pause the emulator: the model answers while the game runs (lag is logged)")
+    ap.add_argument("--judgment-cache", action="store_true",
+                    help="memoise model judgments per (paragraph, question); exact under greedy decoding")
     ap.add_argument("--headed", action="store_true")
     ap.add_argument("--no-capture", action="store_true")
     ap.add_argument("--cap-every", type=int, default=2, help="game frames per captured video frame")
@@ -345,6 +459,8 @@ async def main():
     else:
         jev = Jev()
         print("[backend] cloud Jev (api.typesafe.ai)", flush=True)
+    if args.judgment_cache:
+        jev = JudgmentCache(jev, HERE / "runs" / "_judgment_cache.jsonl")
     results, video = [], None
     async with async_playwright() as p:
         flags = ["--autoplay-policy=no-user-gesture-required"]
@@ -352,13 +468,35 @@ async def main():
             flags += ["--enable-unsafe-swiftshader", "--use-gl=angle", "--use-angle=swiftshader"]
         browser = await p.chromium.launch(headless=not args.headed, args=flags)
         for num in range(1, args.attempts + 1):
+            rec = {"record_video_dir": str(outdir / f"live_{num:02d}"),
+                   "record_video_size": {"width": 2200, "height": 900}} if args.realtime else {}
             ctx = await browser.new_context(user_agent=UA, viewport={"width": 2200, "height": 900},
-                                            device_scale_factor=args.scale)
+                                            device_scale_factor=1.0 if args.realtime else args.scale, **rec)
             page = await ctx.new_page()
             policy = ({"design": args.design, "t_jump": args.t_jump, "t_full": args.t_full}
                       if args.policy == "atomic" else None)
             att = Attempt(page, jev, num, outdir, not args.no_capture, args.cap_every, args.max_decisions, policy)
             print(f"=== attempt {num} ===", flush=True)
+            if args.realtime:
+                att.capture = False                      # the browser records wall-clock video itself
+                res = await att.run_live()
+                vid = await page.video.path() if page.video else None
+                await ctx.close()
+                if vid and att.clip:
+                    c, out = att.clip, outdir / f"live_{num:02d}_{'CLEARED' if res['outcome'] == 'cleared' else 'failed'}.mp4"
+                    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(vid), "-vf",
+                                    f"crop={c['width']}:{c['height']}:{c['x']}:{c['y']},format=yuv420p",
+                                    "-c:v", "libx264", "-preset", "slow", "-crf", "18", "-movflags", "+faststart",
+                                    str(out)], check=True)
+                    res["video"] = str(out)
+                if args.judgment_cache:
+                    res["cache"] = {"hits": jev.hits, "misses": jev.misses}
+                results.append(res)
+                print(json.dumps(res), flush=True)
+                if res["outcome"] == "cleared":
+                    video = res.get("video")
+                    break
+                continue
             res = await att.run()
             await ctx.close()
             if att.capture and att.manifest:

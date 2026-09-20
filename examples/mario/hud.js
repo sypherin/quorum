@@ -30,6 +30,10 @@
       this.run(false);
       return gm().getFrameNum() - f0;
     },
+    // ---- live play: the emulator keeps running, nothing here pauses it ----
+    live(on) { this.run(on); },
+    hold(buttons) { this.set(buttons); __hud.pad(buttons); },
+    async peek() { return { frame: gm().getFrameNum(), ram: await this.ram() }; },
     async act(buttons, n) {
       this.set(buttons);
       __hud.pad(buttons);

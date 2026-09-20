@@ -54,7 +54,9 @@ That's literally what each request does.
 ![the local 4B clearing World 1-1](docs/media/mario-1-1-quorum-local-4b.gif)
 
 Every decision in that run is a `noul` question answered by the 4B behind this shim
-([full video](docs/media/mario-1-1-quorum-local-4b.mp4), paused-emulator harness, not real time).
+([full video](docs/media/mario-1-1-quorum-local-4b.mp4), paused-emulator harness). It also clears
+the level live, emulator never paused, from memoised judgments
+([live video](docs/media/mario-1-1-quorum-local-4b-live.mp4), 38 s, median lag 1 frame).
 
 Asked cloud Jev's single 5-way question, the same 4B answered `run_right` 22 times in a row
 and died at the first goomba. It cleared the level once the judgment was cut into plain yes/no

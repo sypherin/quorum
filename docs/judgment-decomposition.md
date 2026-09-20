@@ -114,9 +114,14 @@ pauses the emulator while it answers. Without the rationale a judgment takes 373
 scores stop separating (AUC 0.71), so that is not an option for this model. A model trained to
 answer directly, which is what Jev is, would not pay this cost.
 
-There is a second route. The policy only depends on `φ(s)`, and `φ` takes few values, so judgments can be
-memoised per situation: judged once, replayed at lookup speed, with a miss judged in the
-background while the last action holds. We have not built this yet.
+There is a second route, and we built it. The policy only depends on `φ(s)`, and `φ` takes few
+values, so judgments can be memoised per situation: judged once by the model, then replayed at
+lookup speed. Under greedy decoding the stored answer is exactly what the model would say again.
+With the cache warmed over every paragraph seen in logged runs, the 4B cleared the level live,
+emulator never paused, at a median lag of 1 frame. A miss is judged in the background while the
+last action holds, and costs about 1.7 s of blind play, so coverage of the abstraction decides
+whether a live run survives. This works for any task where `φ` is small: the expensive model
+call happens once per situation, not once per event.
 
 ## Limits
 

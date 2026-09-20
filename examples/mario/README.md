@@ -12,9 +12,10 @@ buttons: no vetoes, no fallback action, the same rule the cloud harness follows 
 whatever Jev chose. Decoding is greedy and the emulator is stepped exactly, so the same code
 replays the same run.
 
-It is not real time. The emulator is paused while the model answers and stepped an exact
-number of frames between decisions, then the video is assembled at true game speed. A 4B
-at 1.7 s per judgment cannot steer a 60 fps game live, and we don't claim it does.
+That run is not real time. The emulator is paused while the model answers and stepped an exact
+number of frames between decisions, then the video is assembled at true game speed. A 4B at
+1.7 s per judgment cannot steer a 60 fps game call by call. It can play live from memoised
+judgments, which is the second video, further down.
 
 ## What failed first
 
@@ -42,7 +43,9 @@ What the bench showed about this 4B:
 | an ASCII map of the screen | worse than prose. Close goomba and empty ground both read 0.50 |
 | "would a short hop be too small here?" | inverted, AUC 0.03. Negative phrasing flips it |
 | a fourth "or" added to a question that worked | broke it: a reading that was 0.58 fell to 0.08 |
-| one question per call, the situation in words | reads every distinct teacher situation correctly |
+| a 3-way `choice` (run, hop, jump) over the words state | answers hop on 27 of 28 situations, 15 of 28 correct |
+| a 3-level `score` (no jump, hop, full jump) over the words state | 20 of 28: reads tall walls, misses pits and enemy groups |
+| one yes/no question per call, the situation in words | reads every distinct teacher situation correctly, 28 of 28 |
 | the same, with the rationale switched off | 373 ms per judgment, but yes and no overlap again (AUC 0.71) |
 
 So the state became one short paragraph with proximity in words, written by code:
@@ -69,6 +72,35 @@ the teacher logs before the fix went in: an enemy waiting below a pipe Mario was
 off, a threshold cut too fine, a sentence that had never been in the verified set and read as
 "jump now" with the enemy still far away, and a hop into a goomba pair because no question
 asked about groups.
+
+## Live play
+
+![the local 4B clearing World 1-1 live](../../docs/media/mario-1-1-quorum-local-4b-live.gif)
+
+[Full live run](../../docs/media/mario-1-1-quorum-local-4b-live.mp4): the emulator is never paused,
+this is a wall-clock recording. 38 s, 275 decisions, median lag 1 frame between reading the
+state and pressing the buttons.
+
+The policy only depends on the paragraph, and there are few paragraphs. Decoding is greedy, so
+the model's answer to a given paragraph and question never changes. `warm_cache.py` asks the 4B
+every question about every distinct paragraph seen in any logged run (51 paragraphs, 162
+questions, about 5 minutes) and stores the answers. At play time a judgment is a lookup. The
+answers are still the model's own, computed ahead of time, and a paragraph that is not in the
+cache goes to the model while the game keeps running.
+
+That last part is the honest limit. A miss costs about 1.7 s of blind play. Our first two live
+attempts each hit a few unseen paragraphs and died; the attempts after that (no misses, and one
+miss) both cleared. The HUD says MEMOISED and shows 0 ms when an answer came from the cache.
+
+For comparison we ran cloud Jev live in the same loop, calling the API for every decision:
+median lag 19 frames (about 0.3 s), and it died at x=711 and x=314 in two attempts. By the time
+the answer lands, Mario is up to three tiles further on than the state it was based on.
+
+```bash
+python3 warm_cache.py
+python3 play.py --backend local --policy atomic --realtime --judgment-cache --attempts 5
+python3 play.py --backend cloud --realtime          # cloud Jev, live, a fresh call per decision
+```
 
 ## Who does what
 
