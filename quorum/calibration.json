@@ -1,0 +1,6 @@
+{
+  "temperatures": {
+    "noul": 3.757518
+  },
+  "note": "choice: n=8 < MIN_N=30 -> omitted from temperatures; noul: n=142 -> T=3.757518 (NLL 62.701 vs T=1 112.728); score: n=4 < MIN_N=30 -> omitted from temperatures | MIN_N=30; omitted types fall back to T=1"
+}
