@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Arena report: every system on the same items, scored the same way.
 
-  report.py [system ...] [--out _report]     (default: every system under _runs/)
+  report.py [system ...] [--tasks a,b] [--limit N] [--out _report]
+                                  (default: every system under _runs/, every task)
 
 Writes <out>.md and <out>.json. The rules, because a benchmark is only as
 honest as its denominators:
@@ -16,6 +17,9 @@ honest as its denominators:
   temperature per question type, and Platt for noul. The raw columns are what
   a system ships today; the CV columns are what it could ship after fitting on
   that much labelled data. Calibration moves probabilities only, never labels.
+- --limit N scores only the first N items of each task, the same slice run.py
+  --limit N answers, so a sliced run (CoT, a brain A/B) is compared with every
+  other system on exactly its items and is not charged for the rest.
 - Latency is the median ms per item from the run rows. For laya only rows
   tagged meta.load == "stock" count: the memory-mapped load gives the same
   numbers but a slower code path, and untagged rows predate the tag.
@@ -223,11 +227,14 @@ def median_ms(rows: dict[str, dict], system: str) -> float | None:
     return statistics.median(ms) if ms else None
 
 
-def evaluate(systems: list[str], tasks: list[str]) -> dict:
-    report: dict = {"cells": {}, "pairs": [], "systems": systems, "tasks": tasks}
+def evaluate(systems: list[str], tasks: list[str], limit: int = 0) -> dict:
+    report: dict = {"cells": {}, "pairs": [], "systems": systems, "tasks": tasks, "limit": limit}
     correctness: dict[tuple[str, str], list[float]] = {}
     for task in tasks:
         items = [json.loads(l) for l in open(DATA / f"{task}.jsonl")]
+        if limit:
+            items = items[:limit]  # run.py --limit answers exactly this slice
+        ids = {it["id"] for it in items}
         all_units = build_units(items)
         for s in systems:
             path = RUNS / s / f"{task}.jsonl"
@@ -237,7 +244,7 @@ def evaluate(systems: list[str], tasks: list[str]) -> dict:
             if not units:
                 report["cells"][f"{s}|{task}"] = {"na": "private items are never sent to the cloud"}
                 continue
-            rows = read_run(path)
+            rows = {k: r for k, r in read_run(path).items() if k in ids}
             preds = attach(units, rows)
             cell = score_cell(units, preds)
             cell.update(calibration_columns(units, preds))
@@ -342,11 +349,12 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("systems", nargs="*")
     ap.add_argument("--tasks", default="")
+    ap.add_argument("--limit", type=int, default=0, help="first N items of each task, as run.py --limit")
     ap.add_argument("--out", default=str(HERE / "_report"))
     args = ap.parse_args()
     systems = args.systems or sorted(p.name for p in RUNS.iterdir() if p.is_dir())
     tasks = [t for t in args.tasks.split(",") if t] or sorted(p.stem for p in DATA.glob("*.jsonl"))
-    report = evaluate(systems, tasks)
+    report = evaluate(systems, tasks, args.limit)
     Path(args.out + ".json").write_text(json.dumps(report, indent=1, default=str))
     md = to_markdown(report)
     Path(args.out + ".md").write_text(md)

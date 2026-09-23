@@ -168,3 +168,27 @@ def test_median_ms_counts_only_stock_laya_rows():
     assert R.median_ms(rows, "laya") == 200
     assert R.median_ms(rows, "quorum-direct") == 500
     assert R.median_ms({"4": rows["4"]}, "laya-td") is None
+
+
+def test_limit_scores_the_run_py_slice_only(tmp_path, monkeypatch):
+    data, runs = tmp_path / "_data", tmp_path / "_runs"
+    monkeypatch.setattr(R, "DATA", data)
+    monkeypatch.setattr(R, "RUNS", runs)
+    _write(data / "t.jsonl", [_item(str(i), "a") for i in range(10)])
+    good = {"a": 0.8, "b": 0.1, "c": 0.1}
+    # a --limit 4 run: first 4 items answered (slow ones), nothing after
+    _write(runs / "quorum-cot" / "t.jsonl", [_row(str(i), "a", good, ms=900) for i in range(4)])
+    # a full run whose items past the slice are fast and wrong
+    _write(runs / "quorum-direct" / "t.jsonl",
+           [_row(str(i), "a" if i < 4 else "b", good, ms=100 if i < 4 else 5) for i in range(10)])
+
+    full = R.evaluate(["quorum-direct", "quorum-cot"], ["t"])
+    assert full["cells"]["quorum-cot|t"]["coverage"] == 0.4          # unsliced: charged for 6 misses
+
+    sl = R.evaluate(["quorum-direct", "quorum-cot"], ["t"], limit=4)
+    assert sl["cells"]["quorum-cot|t"]["coverage"] == 1.0
+    assert sl["cells"]["quorum-cot|t"]["acc"] == 1.0
+    assert sl["cells"]["quorum-direct|t"]["acc"] == 1.0              # its wrong tail is out of scope
+    assert sl["cells"]["quorum-direct|t"]["ms"] == 100               # latency from the slice's rows only
+    (pair,) = [p for p in sl["pairs"] if p["task"] == "t"]
+    assert pair["n"] == 4
