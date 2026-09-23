@@ -7,7 +7,10 @@ _runs/<system>/<task>.jsonl is skipped; an item that errored is retried.
 Every line: {"id", "ok", "answers": {qid: normalized}, "raw": {qid: raw}, "ms", "meta"}
 or {"id", "ok": false, "error"}. Failures are written, counted and printed, never skipped.
 The memory watchdog stops the run (exit 3) when MemAvailable falls below
---min-avail-gib, before the host's own OOM guard has to.
+--min-avail-gib, before the host's own OOM guard has to. The circuit breaker
+stops it (exit 4) after --max-consecutive-errors failures in a row: a dead
+upstream fails in milliseconds, and without it one outage writes an error row
+for every remaining item instead of a handful.
 """
 from __future__ import annotations
 
@@ -31,6 +34,19 @@ def mem_avail_gib() -> float:
         if line.startswith("MemAvailable:"):
             return int(line.split()[1]) / 1048576
     return float("nan")
+
+
+class Breaker:
+    """Trips after `limit` consecutive failures (0 = never); any success resets the streak."""
+
+    def __init__(self, limit: int):
+        self.limit, self.streak, self.tripped = limit, 0, False
+
+    def record(self, ok: bool) -> bool:
+        self.streak = 0 if ok else self.streak + 1
+        if self.limit and self.streak >= self.limit:
+            self.tripped = True
+        return self.tripped
 
 
 def load_items(task: str) -> list[dict]:
@@ -60,6 +76,8 @@ def main():
     ap.add_argument("--min-avail-gib", type=float, default=None,
                     help="memory floor; default 6.5 for systems that load a local model (laya*), "
                          "off for quorum (model already resident) and jev (cloud)")
+    ap.add_argument("--max-consecutive-errors", type=int, default=10,
+                    help="stop the run (exit 4) after this many failures in a row; 0 = never")
     args = ap.parse_args()
     if args.min_avail_gib is None:
         args.min_avail_gib = 6.5 if args.system.startswith("laya") else 0.0
@@ -72,6 +90,7 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     lock = threading.Lock()
     grand = {"ok": 0, "err": 0, "skipped_private": 0}
+    breaker = Breaker(args.max_consecutive_errors)
 
     for task in tasks:
         items = load_items(task)
@@ -95,7 +114,7 @@ def main():
         stop = threading.Event()
 
         def one(it):
-            if stop.is_set():
+            if stop.is_set() or breaker.tripped:
                 return
             if mem_avail_gib() < args.min_avail_gib:
                 stop.set()
@@ -116,6 +135,7 @@ def main():
                 f.flush()
                 stats[key] += 1
                 stats["ms"] += rec["ms"]
+                breaker.record(key == "ok")
                 n = stats["ok"] + stats["err"]
                 if key == "err" and stats["err"] <= 5:
                     print(f"[{task}] ERROR {it['id']}: {rec['error'][:200]}", flush=True)
@@ -135,6 +155,10 @@ def main():
             print(f"STOPPED by memory watchdog: MemAvailable {mem_avail_gib():.1f} GiB "
                   f"< {args.min_avail_gib}", flush=True)
             sys.exit(3)
+        if breaker.tripped:
+            print(f"STOPPED by circuit breaker: {breaker.streak} consecutive errors "
+                  f"(last in {task}); fix the system and rerun, done items are kept", flush=True)
+            sys.exit(4)
     print(f"TOTAL {args.system}: ok={grand['ok']} err={grand['err']} private_skipped={grand['skipped_private']}",
           flush=True)
 
