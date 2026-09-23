@@ -10,6 +10,15 @@ and `score` questions by constraining the model's output and reading token
 logprobs, so a "probability" falls out of the decode instead of being parsed
 out of prose. No account, no billing, nothing leaves the machine.
 
+**The model behind it is ours, and it is open.** quorum runs on
+[judgment-qc-gate-qwen3-4b](https://huggingface.co/AltronisSG/judgment-qc-gate-qwen3-4b-GGUF),
+our Qwen3-4B fine-tune for judging work, on Hugging Face under Apache-2.0: a
+4.3 GB Q8_0 GGUF, with the LoRA adapter, training corpus notes and limitations in the
+[companion repo](https://huggingface.co/AltronisSG/judgment-qc-gate-qwen3-4b-lora).
+It is the file our own agent gate runs in production (its sha256 matches the
+Hugging Face copy). Any llama-server model works behind the shim; this is the one
+we run and test against.
+
 ## Why Jev, and why this exists
 
 [Jev](https://typesafe.ai) is TypeSafe's System One model: small, fast
@@ -31,7 +40,7 @@ demo but not for an always-on gate:
   labeled judgments* -- something a hosted model can't offer.
 
 So: keep the wire contract, swap the brain. `quorum` speaks the same
-`POST /v1/systemone` shape, runs against a local 4B model, and adds the piece
+`POST /v1/systemone` shape, runs against our own local 4B judgment model, and adds the piece
 the hosted API doesn't give you -- a calibration loop over your own corpus.
 
 The name: a *quorum* is multiple independent judgments called over one state.
@@ -69,10 +78,17 @@ method and how to reuse it on other tasks is in
 ## Quick start
 
 ```bash
-# serve on :8017 against a llama-server chat-completions upstream on :8005
+# the judgment model on :8005 (or any llama-server model)
+hf download AltronisSG/judgment-qc-gate-qwen3-4b-GGUF judgment-qwen3-4b-Q8_0.gguf --local-dir .
+llama-server -m judgment-qwen3-4b-Q8_0.gguf --host 127.0.0.1 --port 8005 \
+  --ctx-size 4096 --parallel 1 -ngl 99 -fa 1 --jinja --reasoning-budget 0 --cache-ram 0
+
+# serve quorum on :8017 against it
 uvicorn quorum.serve:app --host 127.0.0.1 --port 8017
 # env: QUORUM_UPSTREAM, QUORUM_MODEL_ALIAS, QUORUM_PORT, QUORUM_COT,
-#      QUORUM_LOG, QUORUM_CALIBRATION, QUORUM_MAX_STATE_CHARS
+#      QUORUM_LOG, QUORUM_CALIBRATION, QUORUM_MAX_STATE_CHARS,
+#      QUORUM_FANOUT, QUORUM_FANOUT_CONCURRENCY, QUORUM_STATE_FORMAT,
+#      QUORUM_CACHE_SIZE
 ```
 
 One request, three primitives:
@@ -117,7 +133,7 @@ Four things grow out of that corpus:
    confident-error list (high-prob calls that were wrong), with the
    majority-class floor printed next to decision accuracy so a 95%-one-class
    question doesn't look like a win. Borrowed from the kev/Jev eval harnesses:
-   score calibration, not just accuracy. Needs labels -- that's the next step.
+   score calibration as well as accuracy. Needs labels -- that's the next step.
 2. **Label what mattered.** `python3 -m quorum.label` walks the log
    newest-first, one judgment per screen; Enter agrees with quorum, `n`
    overrides per question. Verdicts merge into the log as a `labels` dict --
@@ -125,7 +141,12 @@ Four things grow out of that corpus:
 3. **Runtime calibration.** `python3 -m quorum.calibrate labeled.jsonl` fits a
    per-question-type temperature (NLL minimisation over the logged probs) and
    writes `calibration.json`, which `serve.py` picks up automatically. Raw
-   logprob → tuned logprob, no retraining. (`bench/fit_calibration.py` goes
+   logprob → tuned logprob, no retraining. `--noul-method platt` fits yes/no
+   questions with Platt scaling instead (a slope and an offset, so it can also
+   fix a bias toward "yes"); it is refused below 30 labels or when it does not
+   beat the identity map. The log keeps the raw answers next to the served
+   (calibrated) ones and calibration always refits on the raw ones, so a
+   second fit never compounds the first. (`bench/fit_calibration.py` goes
    further -- Platt maps fitted against the cloud-Jev teacher with 5-fold CV;
    `bench/calibration_teacher.json` is the honest result: vs cloud probs,
    ECE 0.23 → 0.13 fitted, but vs gold labels the local 4B still doesn't
@@ -150,6 +171,7 @@ agent work → hooks ask quorum → judgments logged → humans label what matte
 ```bash
 python -m pytest tests/ -q              # the shim
 python -m pytest examples/mario -q      # the Mario example: state decoding and policy
+cd bench/arena && python -m pytest -q   # the benchmark: metrics, report, adapters, runner
 ```
 
 ## Credits & license
@@ -159,5 +181,7 @@ python -m pytest examples/mario -q      # the Mario example: state decoding and 
   [typesafe.ai](https://typesafe.ai) and their Jev / RLCD work. "SystemOne"
   and "Jev" are their concepts; this project is an independent local
   re-implementation of the request contract, not their software.
-- Base model served here: Qwen3-4B (Apache-2.0) via llama.cpp/llama-server.
+- Model served here: our judgment model,
+  [AltronisSG/judgment-qc-gate-qwen3-4b-GGUF](https://huggingface.co/AltronisSG/judgment-qc-gate-qwen3-4b-GGUF)
+  (Apache-2.0), a LoRA fine-tune of Qwen3-4B (Apache-2.0), via llama.cpp/llama-server.
 - quorum code: Apache-2.0 -- see [LICENSE](LICENSE).
