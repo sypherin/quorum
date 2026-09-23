@@ -75,6 +75,29 @@ no code overrides. What a 4B can and cannot read is in [examples/mario](examples
 method and how to reuse it on other tasks is in
 [docs/judgment-decomposition.md](docs/judgment-decomposition.md).
 
+## Benchmark: quorum vs Jev vs laya
+
+We ran quorum, cloud Jev and [laya](https://huggingface.co/convaiinnovations/laya) (open
+ModernBERT decision heads) over the same 3,664 items: 18 tasks, 5,327 scored questions,
+with a paired bootstrap on every difference. Full tables, rules and fairness notes are in
+[docs/benchmark.md](docs/benchmark.md); the harness is [bench/arena](bench/arena/).
+
+- **quorum on our judge beats laya** by 0.085 accuracy pooled (95% CI 0.068 to 0.102). It is ahead on
+  6 tasks, behind on 2, and level on the other 10.
+- **quorum trails Jev** by 0.221 (0.206 to 0.236), and only draws with it on AG News.
+  That is the honest gap between a 4B used zero-shot and a hosted model trained for this
+  contract.
+- **What closes part of it:** chain-of-thought (+0.088 on a 50-item slice, at about 4x
+  the latency), one call per question on multi-question states (+0.065), and a
+  cross-validated yes/no threshold (SST-2 0.793 to 0.920).
+- **The model file matters most.** The same shim in front of stock Qwen3-4B-Instruct-2507
+  is 0.106 ahead of our judge (0.092 to 0.119), 0.190 ahead of laya, and 0.117 behind Jev.
+  Its raw probabilities sit near 0 or 1, so fit a map (`quorum.calibrate`) before trusting
+  them. Our judge keeps its edge on the job it was trained for: asked in its own format, it
+  passes none of the 43 gate items where a standard was broken.
+- **Raw probabilities are overconfident.** A cross-validated map of one or two numbers
+  per question type brings quorum's ECE under 0.10 on 15 of 18 tasks (5 of 18 raw).
+
 ## Quick start
 
 ```bash

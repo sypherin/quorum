@@ -5,7 +5,9 @@ _pkg/
 _*.log
 _*.py
 _*.sh
-_report_partial.*
+_report_*
+_*.md
+_*.out
 # host operations (which units stop, which guard loads a model): private, not public repo
 laya_window.sh
 brain_window.sh
