@@ -32,6 +32,56 @@ cost: chain-of-thought (+0.088 on a 50-item slice, about 4x the latency), one ca
 question on multi-question states (+0.065), a shortlist for 77-way choices (+0.047), and a
 fitted yes/no threshold (sst2 0.793 to 0.920). Nothing we tried gets quorum to Jev.
 
+### At a glance
+
+Pooled over the 17 tasks all four systems ran (Jev never sees gate). Accuracy is raw unless
+the row says otherwise. AUROC is how well P(yes) ranks yes items above no items (1.0 is
+perfect, 0.5 is chance); "fitted" is a map learned from labels under 5-fold cross-validation.
+The differences behind these numbers, with intervals, are in the sections below.
+
+| | Jev (hosted) | laya | quorum + our judge | quorum + Qwen3-4B-2507 |
+|---|---|---|---|---|
+| accuracy, raw (17 shared tasks, 5,201 units) | 0.801 | 0.491 | 0.580 | 0.684 |
+| accuracy, fitted yes/no threshold | 0.805 | 0.522 | 0.588 | 0.690 |
+| highest raw accuracy, tasks of 18 | 16 | 2 | 0 | 1 |
+| ECE, raw (median of 8 tasks, see note) | 0.092 | 0.201 | 0.139 | 0.181 |
+| ECE, fitted map (median of 8 tasks, see note) | 0.031 | 0.051 | 0.054 | 0.059 |
+| AUROC on yes/no (median, 8 tasks) | 0.970 | 0.736 | 0.791 | 0.911 |
+| ms per item, one question (median) | 311 | 152 | 482 | 304 |
+| ms per item, five questions | 316 | 1226 | 1430 | 1254 |
+| runs on | hosted API | CPU, fp32 | 4B at Q8_0, local GPU | 4B at Q8_0, local GPU |
+| the state leaves your machine | yes | no | no | no |
+
+Note on the ECE rows: they use the 8 tasks where every answer from every system carries a
+probability. On the other 10, Qwen3-4B-2507 is sometimes so sure of its answer that no
+second option reaches its 12 most likely tokens, and quorum returns no probability (881
+answers). Under the rules those score as uniform, which would inflate its ECE, so this row
+leaves those tasks out.
+
+Accuracy by task, raw, bold is the highest in each row. laya's typed-decisions specialist, trained on those four workflows, scores 0.766 there.
+
+| task | majority floor | Jev (hosted) | laya | quorum + our judge | quorum + Qwen3-4B-2507 |
+|---|---|---|---|---|---|
+| agnews | 0.290 | 0.843 | **0.923** | 0.853 | 0.837 |
+| banking77 | 0.027 | **0.807** | 0.357 | 0.573 | 0.660 |
+| cuad | 0.500 | **0.925** | 0.658 | 0.825 | 0.887 |
+| emotion | 0.367 | **0.620** | **0.620** | 0.577 | 0.590 |
+| gate | 0.500 | n/a | 0.492 | 0.413 | **0.587** |
+| injection | 0.517 | **0.767** | 0.621 | 0.517 | 0.534 |
+| irony | 0.500 | **0.853** | 0.687 | 0.567 | 0.733 |
+| legalbench | 0.500 | **0.866** | 0.634 | 0.629 | 0.766 |
+| mario | 0.782 | **0.994** | 0.345 | 0.758 | 0.952 |
+| massive_en | 0.140 | **0.933** | 0.700 | 0.640 | 0.793 |
+| massive_ms | 0.140 | **0.900** | 0.213 | 0.520 | 0.673 |
+| massive_ta | 0.140 | **0.920** | 0.273 | 0.340 | 0.627 |
+| massive_zh | 0.140 | **0.907** | 0.600 | 0.607 | 0.793 |
+| offensive | 0.500 | **0.813** | 0.627 | 0.607 | 0.753 |
+| spam | 0.500 | **0.973** | 0.773 | 0.820 | 0.853 |
+| sst2 | 0.500 | **0.960** | 0.620 | 0.793 | 0.907 |
+| sst5 | 0.275 | **0.565** | 0.295 | 0.325 | 0.460 |
+| typed_decisions | 0.461 | **0.740** | 0.361 | 0.497 | 0.598 |
+| **pooled, 17 shared tasks** | | 0.801 | 0.491 | 0.580 | 0.684 |
+
 ### Accuracy, full run
 
 `quorum` is `quorum-direct` in front of our judge, the shipped default. Differences are paired bootstraps; bold
@@ -315,6 +365,15 @@ Against our judge on the slice, pooled: Qwen3-4B-Instruct-2507 +0.138 (+0.105 to
   item took 1,112 ms on gate against 899 ms with one slot, and 1,891 ms against 1,819 ms
   on typed-decisions, at the same accuracy (gate 0.370 against 0.380, typed-decisions
   0.508 each). On this integrated GPU, one slot is the setting.
+
+gate by question, in one table (lower is better in the last two columns):
+
+| system | right verdict, of 63 | right yes/no, of 63 | broken items called OK by verdict, of 43 | broken items called OK by yes/no, of 43 |
+|---|---|---|---|---|
+| laya | 26 | 36 | 19 | 20 |
+| quorum + our judge | 27 | 25 | 23 | 38 |
+| quorum + Qwen3-4B-2507 | 20 | **54** | **0** | **0** |
+| our judge in its own format, no quorum | **35** | - | **0** | - |
 
 ### Latency
 
