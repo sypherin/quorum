@@ -351,14 +351,16 @@ Against our judge on the slice, pooled: Qwen3-4B-Instruct-2507 +0.138 (+0.105 to
 - **On gate the result splits by question.** gate asks for a 16-way verdict and a yes/no
   "was the work done properly". Our judge picks the right verdict more often (27 of 63,
   against 20), so the fine-tune did learn its categories. On the yes/no question our judge
-  says "yes" to 38 of the 43 items where a standard was broken, and Qwen3-4B-Instruct-2507
-  says "yes" to none. The gain on gate comes from that question, and it disappears once
+  says "yes" to 38 of the 43 items where a standard was broken. Qwen3-4B-Instruct-2507 says
+  "yes" to none of them, but it also says "no" to 9 of the 20 good items, and on the verdict
+  question it passes only 1 of the 20: our judge leans to approve, this model to reject.
+  The gain on gate comes from the yes/no question, and it disappears once
   both are re-decided on a fitted threshold (-0.016, interval -0.119 to +0.087). This model is also slower on
   gate (2.2 s against 0.7 s per item): its answers there run to a median 77 tokens against
   17.
 - **Typed questions cost our judge part of what it learned.** Asked in its own trained
   format (its training system prompt, a free-text verdict tag), the same file gets 35 of
-  63 verdicts right and passes none of the 43 broken-standard items as OK. That is the
+  63 verdicts right, passes all 20 good items and catches all 43 broken ones. That is the
   best gate result in this report, and it is how our own gate runs it.
 - **A second slot did not buy speed.** `quorum-fanout@judge-p2` ran our judge with two
   parallel slots, and quorum sending two fan-out calls at once. On the slice the median
@@ -366,14 +368,17 @@ Against our judge on the slice, pooled: Qwen3-4B-Instruct-2507 +0.138 (+0.105 to
   on typed-decisions, at the same accuracy (gate 0.370 against 0.380, typed-decisions
   0.508 each). On this integrated GPU, one slot is the setting.
 
-gate by question, in one table (lower is better in the last two columns):
+gate by question, in one table (higher is better in every column):
 
-| system | right verdict, of 63 | right yes/no, of 63 | broken items called OK by verdict, of 43 | broken items called OK by yes/no, of 43 |
+| system | question | right verdict (16 options), of 63 | good items passed, of 20 | broken items caught, of 43 |
 |---|---|---|---|---|
-| laya | 26 | 36 | 19 | 20 |
-| quorum + our judge | 27 | 25 | 23 | 38 |
-| quorum + Qwen3-4B-2507 | 20 | **54** | **0** | **0** |
-| our judge in its own format, no quorum | **35** | - | **0** | - |
+| laya | verdict | 26 | 18 | 24 |
+| laya | yes/no | - | 13 | 23 |
+| quorum + our judge | verdict | 27 | **20** | 20 |
+| quorum + our judge | yes/no | - | **20** | 5 |
+| quorum + Qwen3-4B-2507 | verdict | 20 | 1 | **43** |
+| quorum + Qwen3-4B-2507 | yes/no | - | 11 | **43** |
+| our judge in its own format, no quorum | verdict | **35** | **20** | **43** |
 
 ### Latency
 

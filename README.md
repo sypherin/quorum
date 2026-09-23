@@ -132,14 +132,17 @@ leaves those tasks out.
 | **pooled, 17 shared tasks** | | 0.801 | 0.491 | 0.580 | 0.684 |
 
 **gate, by question.** 63 held-out items from our judge's training data, 43 of which broke a
-standard. Lower is better in the last two columns; Jev never sees gate.
+standard. Higher is better in every column; Jev never sees gate.
 
-| system | right verdict, of 63 | right yes/no, of 63 | broken items called OK by verdict, of 43 | broken items called OK by yes/no, of 43 |
+| system | question | right verdict (16 options), of 63 | good items passed, of 20 | broken items caught, of 43 |
 |---|---|---|---|---|
-| laya | 26 | 36 | 19 | 20 |
-| quorum + our judge | 27 | 25 | 23 | 38 |
-| quorum + Qwen3-4B-2507 | 20 | **54** | **0** | **0** |
-| our judge in its own format, no quorum | **35** | - | **0** | - |
+| laya | verdict | 26 | 18 | 24 |
+| laya | yes/no | - | 13 | 23 |
+| quorum + our judge | verdict | 27 | **20** | 20 |
+| quorum + our judge | yes/no | - | **20** | 5 |
+| quorum + Qwen3-4B-2507 | verdict | 20 | 1 | **43** |
+| quorum + Qwen3-4B-2507 | yes/no | - | 11 | **43** |
+| our judge in its own format, no quorum | verdict | **35** | **20** | **43** |
 
 - **quorum on our judge beats laya** by 0.085 accuracy pooled over all 18 tasks (95% CI
   0.068 to 0.102). It is ahead on 6 tasks, behind on 2, and level on the other 10.
@@ -152,8 +155,8 @@ standard. Lower is better in the last two columns; Jev never sees gate.
 - **The model file matters most.** The same shim in front of stock Qwen3-4B-Instruct-2507
   is 0.106 ahead of our judge (0.092 to 0.119), 0.190 ahead of laya over all 18 tasks, and
   0.117 behind Jev. Its raw probabilities sit near 0 or 1, so fit a map (`quorum.calibrate`)
-  before trusting them. Our judge keeps its edge on the job it was trained for: asked in its own format, it
-  passes none of the 43 gate items where a standard was broken.
+  before trusting them. Our judge keeps its edge on the job it was trained for: asked in its
+  own format, it passes all 20 good gate items and catches all 43 broken ones.
 - **Raw probabilities are overconfident.** A cross-validated map of one or two numbers
   per question type brings quorum's ECE under 0.10 on 15 of 18 tasks (5 of 18 raw).
 
