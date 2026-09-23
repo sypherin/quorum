@@ -208,6 +208,19 @@ def test_evaluate_pairs_cv_only_on_tasks_with_noul(tmp_path, monkeypatch):
     assert "| yn | 0.500 -> 1.000 | 0.500 -> 1.000 |" in md and "after CV Platt" in md
 
 
+def test_shortlisted_quorum_is_paired_with_shortlisted_reference(tmp_path, monkeypatch):
+    data, runs = tmp_path / "_data", tmp_path / "_runs"
+    monkeypatch.setattr(R, "DATA", data)
+    monkeypatch.setattr(R, "RUNS", runs)
+    _write(data / "b.jsonl", [_item(str(i), "a") for i in range(4)])
+    for s in ("laya", "laya+sl", "quorum-direct", "quorum-direct+sl"):
+        _write(runs / s / "b.jsonl", [_row(str(i), "a", {"a": 0.8, "b": 0.1, "c": 0.1}) for i in range(4)])
+    rep = R.evaluate(["laya", "laya+sl", "quorum-direct", "quorum-direct+sl"], ["b"])
+    got = {(p["a"], p["b"]) for p in rep["pairs"] if p["task"] == "b"}
+    assert got == {("quorum-direct", "laya"), ("quorum-direct+sl", "laya"), ("quorum-direct+sl", "quorum-direct"),
+                   ("laya+sl", "laya"), ("quorum-direct+sl", "laya+sl")}
+
+
 def test_median_ms_counts_only_stock_laya_rows():
     rows = {"1": _row("1", "a", None, ms=100, meta={"load": "stock"}),
             "2": _row("2", "a", None, ms=900, meta={"load": "mmap"}),

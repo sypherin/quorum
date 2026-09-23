@@ -281,6 +281,9 @@ def evaluate(systems: list[str], tasks: list[str], limit: int = 0) -> dict:
     pairs += [(q, BASELINE) for q in quorums if q != BASELINE and BASELINE in systems]
     pairs += [(s, s[:-3]) for s in systems if s.endswith("+sl") and s[:-3] in systems
               and (s, s[:-3]) not in pairs]
+    # shortlisted quorum against shortlisted references: same candidates, so only the judge differs
+    pairs += [(q, r) for q in quorums if q.endswith("+sl") for r in systems
+              if r.endswith("+sl") and r[:-3] in REFERENCES and (q, r) not in pairs]
     report["pairs"] = paired(pairs, tasks, correctness)
     # the yes/no tasks again, both systems re-decided under CV Platt
     report["pairs_cv"] = paired(pairs, tasks, correctness_cv)
