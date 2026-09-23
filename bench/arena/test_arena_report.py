@@ -123,6 +123,35 @@ def test_cv_platt_repairs_an_overconfident_noul_system():
     assert [p["label"] for p in preds] == ["yes"] * 100
 
 
+def test_cv_platt_redecides_a_biased_noul_system_and_keeps_raw_accuracy():
+    # ranks perfectly but says "no" to everything: P(yes) 0.3 on yes items, 0.1 on no items
+    items = [_item(str(i), "yes" if i % 2 else "no", qtype="noul") for i in range(100)]
+    units = R.build_units(items)
+    rows = {str(i): _row(str(i), "no", {"yes": 0.3 if i % 2 else 0.1, "no": 0.7 if i % 2 else 0.9})
+            for i in range(100)}
+    preds = R.attach(units, rows)
+    cell = R.score_cell(units, preds)
+    cols = R.calibration_columns(units, preds)
+    assert cell["acc"] == 0.5                       # raw column never moves
+    assert cols["cv_platt"]["acc"] == 1.0           # the fitted threshold separates them
+    assert "acc" not in cols["cv_temp"]
+
+
+def test_decide_moves_only_answered_noul_labels():
+    items = [_item("c", "a"), _item("n", "yes", qtype="noul"), _item("u", "yes", qtype="noul")]
+    units = R.build_units(items)
+    rows = {"c": _row("c", "b", {"a": 0.4, "b": 0.5, "c": 0.1}), "n": _row("n", "no", {"yes": 0.2, "no": 0.8})}
+    preds = R.attach(units, rows)
+    mapped = [{"a": 0.9, "b": 0.05, "c": 0.05}, {"yes": 0.7, "no": 0.3}, {"yes": 0.9, "no": 0.1}]
+    assert R.decide(units, preds, mapped) == ["b", "yes", None]
+
+
+def test_cv_platt_labels_none_without_noul_distributions():
+    units = R.build_units([_item(str(i), "a") for i in range(5)])
+    preds = R.attach(units, {str(i): _row(str(i), "a", {"a": 0.8, "b": 0.1, "c": 0.1}) for i in range(5)})
+    assert R.cv_platt_labels(units, preds) is None
+
+
 def test_no_distributions_means_no_calibration_columns():
     units = R.build_units([_item("1", "a")])
     preds = R.attach(units, {"1": _row("1", "a", None)})
@@ -158,6 +187,25 @@ def test_evaluate_private_scope_missing_runs_and_pairs(tmp_path, monkeypatch):
     assert set(pairs) == {("quorum-direct", "jev", "pub"), ("quorum-direct", "jev", "ALL (pooled units)")}
     assert pairs[("quorum-direct", "jev", "pub")]["diff"] == pytest.approx(0.5)
     assert "| priv | " in R.to_markdown(rep) and "n/a" in R.to_markdown(rep)
+
+
+def test_evaluate_pairs_cv_only_on_tasks_with_noul(tmp_path, monkeypatch):
+    data, runs = tmp_path / "_data", tmp_path / "_runs"
+    monkeypatch.setattr(R, "DATA", data)
+    monkeypatch.setattr(R, "RUNS", runs)
+    _write(data / "yn.jsonl", [_item(str(i), "yes" if i % 2 else "no", qtype="noul") for i in range(20)])
+    _write(data / "ch.jsonl", [_item(str(i), "a") for i in range(6)])
+    biased = lambda i: _row(str(i), "no", {"yes": 0.3 if i % 2 else 0.1, "no": 0.7 if i % 2 else 0.9})
+    for s in ("quorum-direct", "laya"):
+        _write(runs / s / "yn.jsonl", [biased(i) for i in range(20)])
+        _write(runs / s / "ch.jsonl", [_row(str(i), "a", {"a": 0.8, "b": 0.1, "c": 0.1}) for i in range(6)])
+    rep = R.evaluate(["laya", "quorum-direct"], ["yn", "ch"])
+    assert {p["task"] for p in rep["pairs_cv"]} == {"yn", "ALL (pooled units)"}
+    assert {p["task"] for p in rep["pairs"]} == {"yn", "ch", "ALL (pooled units)"}
+    assert rep["cells"]["quorum-direct|yn"]["acc"] == 0.5
+    assert rep["cells"]["quorum-direct|yn"]["cv_platt"]["acc"] == 1.0
+    md = R.to_markdown(rep)
+    assert "| yn | 0.500 -> 1.000 | 0.500 -> 1.000 |" in md and "after CV Platt" in md
 
 
 def test_median_ms_counts_only_stock_laya_rows():

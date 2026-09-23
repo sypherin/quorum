@@ -16,7 +16,10 @@ honest as its denominators:
   folds split by ITEM so the questions of one item never straddle a fold:
   temperature per question type, and Platt for noul. The raw columns are what
   a system ships today; the CV columns are what it could ship after fitting on
-  that much labelled data. Calibration moves probabilities only, never labels.
+  that much labelled data. The raw accuracy never moves. A separate accuracy
+  re-decides yes/no questions at 0.5 on the CV Platt probability, which is
+  what a system scores once a threshold is fitted on labelled data: a
+  temperature never moves an argmax, so choice and score labels are kept.
 - --limit N scores only the first N items of each task, the same slice run.py
   --limit N answers, so a sliced run (CoT, a brain A/B) is compared with every
   other system on exactly its items and is not charged for the rest.
@@ -206,12 +209,28 @@ def cv_calibrated(units: list[dict], preds: list[dict], platt: bool, k: int = K_
     return out  # type: ignore[return-value]
 
 
+def decide(units: list[dict], preds: list[dict], probs_list: list[dict]) -> list[str | None]:
+    """Labels after a calibration map: an answered yes/no with a distribution is
+    re-decided at 0.5 on the mapped P(yes); every other label is kept."""
+    return [("yes" if pr["yes"] >= 0.5 else "no") if u["type"] == "noul" and p["answered"] and p["has_dist"]
+            else p["label"] for u, p, pr in zip(units, preds, probs_list)]
+
+
+def cv_platt_labels(units: list[dict], preds: list[dict]) -> list[str | None] | None:
+    """Labels under the CV Platt map, or None when no yes/no question has a distribution."""
+    if not any(u["type"] == "noul" and p["has_dist"] for u, p in zip(units, preds)):
+        return None
+    return decide(units, preds, cv_calibrated(units, preds, platt=True))
+
+
 def calibration_columns(units: list[dict], preds: list[dict]) -> dict:
     if not any(p["has_dist"] for p in preds):
         return {}
     cols = {"cv_temp": score_probs(units, preds, cv_calibrated(units, preds, platt=False))}
     if any(u["type"] == "noul" for u in units):
-        cols["cv_platt"] = score_probs(units, preds, cv_calibrated(units, preds, platt=True))
+        cal = cv_calibrated(units, preds, platt=True)
+        cols["cv_platt"] = score_probs(units, preds, cal)
+        cols["cv_platt"]["acc"] = M.accuracy([u["gold"] for u in units], decide(units, preds, cal))
     best = min(cols, key=lambda c: cols[c]["nll"])
     cols["cv_best"] = {**cols[best], "map": best}
     return cols
@@ -228,8 +247,9 @@ def median_ms(rows: dict[str, dict], system: str) -> float | None:
 
 
 def evaluate(systems: list[str], tasks: list[str], limit: int = 0) -> dict:
-    report: dict = {"cells": {}, "pairs": [], "systems": systems, "tasks": tasks, "limit": limit}
-    correctness: dict[tuple[str, str], list[float]] = {}
+    report: dict = {"cells": {}, "pairs": [], "pairs_cv": [], "systems": systems, "tasks": tasks, "limit": limit}
+    correctness: dict[tuple[str, str], dict] = {}
+    correctness_cv: dict[tuple[str, str], dict] = {}  # yes/no re-decided under CV Platt
     for task in tasks:
         items = [json.loads(l) for l in open(DATA / f"{task}.jsonl")]
         if limit:
@@ -252,11 +272,23 @@ def evaluate(systems: list[str], tasks: list[str], limit: int = 0) -> dict:
             report["cells"][f"{s}|{task}"] = cell
             correctness[(s, task)] = {(u["item"], u["qid"]): float(p["label"] == u["gold"])
                                       for u, p in zip(units, preds)}
+            cv_labels = cv_platt_labels(units, preds)
+            if cv_labels is not None:
+                correctness_cv[(s, task)] = {(u["item"], u["qid"]): float(lab == u["gold"])
+                                             for u, lab in zip(units, cv_labels)}
     quorums = [s for s in systems if s.startswith("quorum")]
     pairs = [(q, r) for q in quorums for r in systems if r in REFERENCES]
     pairs += [(q, BASELINE) for q in quorums if q != BASELINE and BASELINE in systems]
     pairs += [(s, s[:-3]) for s in systems if s.endswith("+sl") and s[:-3] in systems
               and (s, s[:-3]) not in pairs]
+    report["pairs"] = paired(pairs, tasks, correctness)
+    # the yes/no tasks again, both systems re-decided under CV Platt
+    report["pairs_cv"] = paired(pairs, tasks, correctness_cv)
+    return report
+
+
+def paired(pairs: list[tuple[str, str]], tasks: list[str], correctness: dict) -> list[dict]:
+    out = []
     for a, b in pairs:
         pooled_a, pooled_b = [], []
         for task in tasks:
@@ -265,14 +297,13 @@ def evaluate(systems: list[str], tasks: list[str], limit: int = 0) -> dict:
                 continue
             keys = sorted(set(ca) & set(cb))
             va, vb = [ca[k] for k in keys], [cb[k] for k in keys]
-            pb = M.paired_bootstrap(va, vb)
-            report["pairs"].append({"a": a, "b": b, "task": task, "n": len(keys), **pb})
+            out.append({"a": a, "b": b, "task": task, "n": len(keys), **M.paired_bootstrap(va, vb)})
             pooled_a += va
             pooled_b += vb
         if pooled_a:
-            report["pairs"].append({"a": a, "b": b, "task": "ALL (pooled units)", "n": len(pooled_a),
-                                    **M.paired_bootstrap(pooled_a, pooled_b)})
-    return report
+            out.append({"a": a, "b": b, "task": "ALL (pooled units)", "n": len(pooled_a),
+                        **M.paired_bootstrap(pooled_a, pooled_b)})
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +352,16 @@ def to_markdown(report: dict) -> str:
           lambda c: f"{_fmt(c['nll'])} -> {_fmt(c['cv_best']['nll'])} ({c['cv_best']['map'][3:]})" if "cv_best" in c else _fmt(c["nll"]))
     table("ECE raw -> best CV map", lambda c: f"{_fmt(c['ece'])} -> {_fmt(c['cv_best']['ece'])}" if "cv_best" in c else _fmt(c["ece"]))
     table("Median ms per item", lambda c: _fmt(c["ms"], 0))
+    cv_tasks = [t for t in T if any("acc" in report["cells"].get(f"{s}|{t}", {}).get("cv_platt", {}) for s in S)]
+    if cv_tasks:
+        lines.append("### Accuracy raw -> after a CV Platt threshold (tasks with yes/no questions)\n")
+        lines.append("| task | " + " | ".join(S) + " |")
+        lines.append("|" + "---|" * (len(S) + 1))
+        for t in cv_tasks:
+            row = [_cell(report, s, t, lambda c: f"{_fmt(c['acc'])} -> {_fmt(c['cv_platt']['acc'])}"
+                         if "acc" in c.get("cv_platt", {}) else "-") for s in S]
+            lines.append(f"| {t} | " + " | ".join(row) + " |")
+        lines.append("")
 
     soft = [t for t in T if any("soft_agree" in report["cells"].get(f"{s}|{t}", {}) for s in S)]
     if soft:
@@ -334,11 +375,14 @@ def to_markdown(report: dict) -> str:
                     lines.append(f"| {t} | {s} | {_fmt(c['soft_agree'])} | {_fmt(c['tv'])} | {_fmt(c['kl'])} | {_fmt(c.get('score_mae'))} |")
         lines.append("")
 
-    if report["pairs"]:
-        lines.append("### Paired bootstrap on accuracy (a - b, 95% CI, P(a better))\n")
+    for key, title in (("pairs", "Paired bootstrap on accuracy (a - b, 95% CI, P(a better))"),
+                       ("pairs_cv", "Paired bootstrap after CV Platt (tasks with yes/no questions; yes/no re-decided, other labels kept)")):
+        if not report.get(key):
+            continue
+        lines.append(f"### {title}\n")
         lines.append("| a | b | task | n | diff | 95% CI | P(a>b) |")
         lines.append("|---|---|---|---|---|---|---|")
-        for p in report["pairs"]:
+        for p in report[key]:
             lines.append(f"| {p['a']} | {p['b']} | {p['task']} | {p['n']} | {p['diff']:+.3f} | "
                          f"[{p['ci'][0]:+.3f}, {p['ci'][1]:+.3f}] | {p['p_a_better']:.2f} |")
         lines.append("")
