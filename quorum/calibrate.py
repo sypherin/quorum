@@ -26,8 +26,20 @@ with {"temperatures": {<group>: T, ...}} — serve.py picks it up
 automatically from the package directory (or $QUORUM_CALIBRATION). Ships
 with no file => T=1 everywhere.
 
+Raw vs served: log records carry `raw_answers` (uncalibrated) beside the
+served `answers`. The fit always reads raw_answers: fitting on served answers
+would calibrate an already-calibrated distribution. Records from before
+raw_answers existed count as raw only when written at or before
+LEGACY_RAW_BEFORE (the newest record the first shipped calibration.json was
+fit on, so that file cannot have been in force yet); later legacy records are
+skipped and counted.
+
+noul can instead get a Platt fit (--noul-method platt): P = sigmoid(a *
+logit(p) + b). Temperature is the special case b = 0; Platt can also move the
+yes/no midpoint. The arena's 5-fold comparison decides which one ships.
+
 Usage:
-    python3 -m quorum.calibrate labeled.jsonl [-o calibration.json]
+    python3 -m quorum.calibrate labeled.jsonl [-o calibration.json] [--noul-method temperature|platt]
 """
 from __future__ import annotations
 
@@ -40,6 +52,8 @@ from pathlib import Path
 
 from scipy.optimize import minimize_scalar
 
+from . import core
+
 T_BOUNDS = (0.05, 20.0)
 MIN_N = 30          # question types with fewer labeled samples are omitted
 BOUND_SLACK = 1.01  # a fit within 1% of a bound edge counts as a bound-hit
@@ -48,12 +62,34 @@ BOUND_SLACK = 1.01  # a fit within 1% of a bound edge counts as a bound-hit
 # the metric — no real fit reaches it (0.9-prob correct labels still cost
 # 0.105 nats/sample; this catches the ~1e-18 collapse).
 COLLAPSE_NLL_PER_SAMPLE = 1e-6
+# Newest judgment the first shipped calibration.json (commit 983c887) was fit on.
+LEGACY_RAW_BEFORE = "2026-09-19T02:37:29.120823+00:00"
 
 
-def load_records(path: str) -> list[dict]:
+def _ts_le(a: str, b: str) -> bool:
+    from datetime import datetime
+    return datetime.fromisoformat(a) <= datetime.fromisoformat(b)
+
+
+def raw_answers_of(rec: dict) -> dict | None:
+    """The uncalibrated answers of a log record, or None when the record only
+    holds answers that may already be calibrated."""
+    if rec.get("raw_answers") is not None:
+        return rec["raw_answers"]
+    ts = rec.get("ts")
+    if ts and _ts_le(ts, LEGACY_RAW_BEFORE):
+        return rec.get("answers")
+    return None
+
+
+def load_records(path: str, stats: dict | None = None) -> list[dict]:
     """Accepts the judgment log (records with `answers` + `labels`) and/or the
     sidecar format (lines with `probs` + `label`). Log lines are expanded into
-    one sidecar record per labeled question."""
+    one sidecar record per labeled question, from their RAW answers. Labeled
+    log records with no trustworthy raw answers are skipped and counted in
+    stats["skipped_calibrated"]."""
+    stats = stats if stats is not None else {}
+    stats.setdefault("skipped_calibrated", 0)
     records = []
     with open(path) as f:
         for lineno, line in enumerate(f, 1):
@@ -64,12 +100,18 @@ def load_records(path: str) -> list[dict]:
             if "probs" in rec and "label" in rec:
                 records.append(rec)
                 continue
-            if rec.get("answers"):
+            if rec.get("answers") or rec.get("raw_answers"):
+                if isinstance(rec.get("labels"), dict) and raw_answers_of(rec) is None:
+                    stats["skipped_calibrated"] += 1
+                    continue
                 records.extend(expand_log_record(rec, lineno))
                 continue
             raise ValueError(f"line {lineno}: needs 'probs'+'label' or 'answers'+'labels'")
     if not records:
-        raise ValueError("no labeled records found")
+        skipped = stats["skipped_calibrated"]
+        raise ValueError("no labeled records found" + (
+            f" ({skipped} labeled records skipped: served answers only, written after "
+            f"{LEGACY_RAW_BEFORE}, no raw_answers)" if skipped else ""))
     return records
 
 
@@ -78,7 +120,7 @@ def expand_log_record(rec: dict, lineno: int = 0) -> list[dict]:
     labels = rec.get("labels")
     if not isinstance(labels, dict):
         return out
-    for qid, ans in (rec.get("answers") or {}).items():
+    for qid, ans in (raw_answers_of(rec) or {}).items():
         if qid not in labels:
             continue
         probs = ans.get("probabilities")
@@ -187,20 +229,60 @@ def fit_guarded(name: str, group: list[dict]) -> tuple[float | None, str]:
     return T, f"{name}: n={n} -> T={T:.6f} (NLL {nll:.3f} vs T=1 {nll_for_temperature(1.0, group):.3f})"
 
 
+def platt_nll(group: list[dict], a: float, b: float) -> float:
+    total = 0.0
+    for rec in group:
+        p = core.platt_apply(float(rec["probs"]["yes"]), a, b)
+        p = min(max(p, 1e-12), 1 - 1e-12)
+        w = rec.get("label_weight", 1.0)
+        total += -w * math.log(p if rec["label"] == "yes" else 1 - p)
+    return total
+
+
+def fit_platt_guarded(name: str, group: list[dict]) -> tuple[dict | None, str]:
+    """Platt fit for noul, with the same refusals as fit_guarded: below MIN_N,
+    or no NLL gain over the identity map (a=1, b=0)."""
+    n = len(group)
+    if n < MIN_N:
+        msg = f"{name}: n={n} < MIN_N={MIN_N} -> no platt fit"
+        print(f"WARN {msg}", file=sys.stderr)
+        return None, msg
+    a, b = core.platt_fit([float(r["probs"]["yes"]) for r in group], [r["label"] == "yes" for r in group])
+    nll, base = platt_nll(group, a, b), platt_nll(group, 1.0, 0.0)
+    if not (math.isfinite(a) and math.isfinite(b)) or nll >= base:
+        msg = f"{name}: platt a={a:.4f} b={b:.4f} NLL {nll:.3f} gives no gain over identity {base:.3f} -> refusing to ship"
+        print(f"WARN {msg}", file=sys.stderr)
+        return None, msg
+    return {"a": round(a, 6), "b": round(b, 6)}, f"{name}: n={n} -> platt a={a:.6f} b={b:.6f} (NLL {nll:.3f} vs identity {base:.3f})"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("jsonl", help="labeled judgments JSONL")
     ap.add_argument("-o", "--out", default=str(Path(__file__).with_name("calibration.json")))
+    ap.add_argument("--noul-method", choices=("temperature", "platt"), default="temperature")
     args = ap.parse_args()
 
-    records = load_records(args.jsonl)
+    stats: dict = {}
+    records = load_records(args.jsonl, stats)
+    if stats["skipped_calibrated"]:
+        print(f"WARN skipped {stats['skipped_calibrated']} labeled records that hold only served "
+              f"(possibly calibrated) answers and were written after {LEGACY_RAW_BEFORE}", file=sys.stderr)
     groups: dict[str, list[dict]] = defaultdict(list)
     for rec in records:
         groups[str(rec.get("kind", "default"))].append(rec)
 
     temperatures = {}
+    platt = {}
     notes = []
     for name, group in sorted(groups.items()):
+        if name == "noul" and args.noul_method == "platt":
+            fit, note = fit_platt_guarded(name, group)
+            notes.append(note)
+            if fit is not None:
+                platt[name] = fit
+                print(note)
+            continue
         T, note = fit_guarded(name, group)
         notes.append(note)
         if T is not None:
@@ -209,6 +291,8 @@ def main() -> int:
 
     out = {"temperatures": temperatures,
            "note": "; ".join(notes) + f" | MIN_N={MIN_N}; omitted types fall back to T=1"}
+    if platt:
+        out["platt"] = platt
     Path(args.out).write_text(json.dumps(out, indent=2) + "\n")
     print(f"wrote {args.out}")
     return 0

@@ -19,16 +19,24 @@ class BadRequest(ValueError):
     pass
 
 
-def validate_request(body: dict) -> tuple[Any, dict]:
+STATE_FORMATS = ("json", "prose")
+
+
+def validate_request(body: dict, state_format: str = "json") -> tuple[Any, dict]:
+    """state_format decides how an object/array state reaches the model:
+    "json" (compact JSON, the default) or "prose" (render_state). A string
+    state is always passed through untouched."""
     if not isinstance(body, dict):
         raise BadRequest("body must be an object")
+    if state_format not in STATE_FORMATS:
+        raise BadRequest(f"state_format must be one of {STATE_FORMATS}")
     state = body.get("state")
     if state is None or state == "":
         raise BadRequest("state is required")
     if not isinstance(state, (str, dict, list)):
         raise BadRequest("state must be string or JSON object/array")
     if isinstance(state, (dict, list)):
-        state = json.dumps(state, ensure_ascii=False)
+        state = render_state(state) if state_format == "prose" else json.dumps(state, ensure_ascii=False)
     questions = body.get("questions")
     if not isinstance(questions, dict) or not questions:
         raise BadRequest("questions must be a non-empty object")
@@ -47,6 +55,50 @@ def validate_request(body: dict) -> tuple[Any, dict]:
                 if not isinstance(crit, list) or len(crit) < 2:
                     raise BadRequest(f"question {qid!r}: score criteria must be a list of >=2 levels")
     return state, questions
+
+
+def _scalar(v: Any) -> str:
+    if isinstance(v, str):
+        return v
+    if v is None:
+        return "none"
+    return json.dumps(v, ensure_ascii=False)  # true/false, numbers
+
+
+def render_state(obj: Any, indent: int = 0) -> str:
+    """Structured state as indented `key: value` lines, the way a person would
+    write it down. Nothing is dropped or renamed: every key and value in the
+    JSON appears once, so the only change is the syntax the model reads.
+    Multi-line strings keep their line breaks, indented under their key."""
+    pad = "  " * indent
+    lines: list[str] = []
+    if isinstance(obj, dict):
+        if not obj:
+            return pad + "(empty)"
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)) and v:
+                lines.append(f"{pad}{k}:")
+                lines.append(render_state(v, indent + 1))
+            else:
+                text = "(empty)" if isinstance(v, (dict, list)) else _scalar(v)
+                first, *rest = text.split("\n")
+                lines.append(f"{pad}{k}: {first}")
+                lines.extend(f"{pad}  {r}" for r in rest)
+        return "\n".join(lines)
+    if isinstance(obj, list):
+        if not obj:
+            return pad + "(empty)"
+        for v in obj:
+            if isinstance(v, (dict, list)) and v:
+                lines.append(f"{pad}-")
+                lines.append(render_state(v, indent + 1))
+            else:
+                text = "(empty)" if isinstance(v, (dict, list)) else _scalar(v)
+                first, *rest = text.split("\n")
+                lines.append(f"{pad}- {first}")
+                lines.extend(f"{pad}  {r}" for r in rest)
+        return "\n".join(lines)
+    return pad + _scalar(obj)
 
 
 # Chain-of-thought (opt-in): a bounded reasoning field emitted BEFORE each answer.
@@ -126,24 +178,151 @@ def build_messages(state: str, questions: dict, cot: bool = False) -> list[dict]
 
 
 # ---------------------------------------------------------------------------
-# Calibration (temperature scaling)
+# Calibration: temperature scaling (any type) and Platt scaling (noul)
 # ---------------------------------------------------------------------------
 
-def load_temperatures() -> dict[str, float]:
-    """Per-question-type temperatures from calibration.json.
-
-    Path: $QUORUM_CALIBRATION, else calibration.json next to this module.
-    Missing file => {} => T=1 passthrough (uncalibrated)."""
+def _calibration_path() -> Path:
     path = os.environ.get("QUORUM_CALIBRATION")
-    path = Path(path) if path else Path(__file__).with_name("calibration.json")
+    return Path(path) if path else Path(__file__).with_name("calibration.json")
+
+
+def load_calibration() -> dict:
+    """{"temperatures": {type: T}, "platt": {type: {"a": .., "b": ..}}} from
+    calibration.json ($QUORUM_CALIBRATION, else next to this module).
+    Missing file => both empty => answers pass through uncalibrated."""
+    path = _calibration_path()
     if not path.exists():
-        return {}
+        return {"temperatures": {}, "platt": {}}
     data = json.loads(path.read_text())
-    return {k: float(v) for k, v in data.get("temperatures", {}).items()}
+    return {
+        "temperatures": {k: float(v) for k, v in data.get("temperatures", {}).items()},
+        "platt": {k: {"a": float(v["a"]), "b": float(v["b"])} for k, v in data.get("platt", {}).items()},
+    }
+
+
+def load_temperatures() -> dict[str, float]:
+    """Per-question-type temperatures only (kept for older callers)."""
+    return load_calibration()["temperatures"]
 
 
 def temperature_for(kind: str, temps: dict[str, float]) -> float:
     return temps.get(kind, temps.get("default", 1.0))
+
+
+PLATT_EPS = 1e-6
+
+
+def _logit(p: float) -> float:
+    p = min(max(p, PLATT_EPS), 1 - PLATT_EPS)
+    return math.log(p / (1 - p))
+
+
+def _sigmoid(z: float) -> float:
+    return 1 / (1 + math.exp(-z)) if z >= 0 else math.exp(z) / (1 + math.exp(z))
+
+
+def _platt_loss(xs: list[float], y: list[bool], a: float, b: float, l2: float) -> float:
+    loss = 0.5 * l2 * ((a - 1) ** 2 + b * b)
+    for x, t in zip(xs, y):
+        z = a * x + b
+        # log(1 + e^z) - t*z, computed stably
+        loss += (z if z > 0 else 0.0) + math.log1p(math.exp(-abs(z))) - (z if t else 0.0)
+    return loss
+
+
+def platt_fit(p_yes: list[float], y: list[bool], l2: float = 1e-3, iters: int = 100) -> tuple[float, float]:
+    """Fit P(y) = sigmoid(a * logit(p) + b) by damped Newton (backtracking line
+    search: a plain Newton step overshoots when the starting predictions are
+    saturated). L2 on (a-1, b) keeps a degenerate fit near identity.
+    Returns (a, b); identity is (1, 0).
+
+    Temperature scaling is the special case b = 0, a = 1/T: Platt can also move
+    the midpoint, which a yes/no judge biased toward one answer needs."""
+    xs = [_logit(p) for p in p_yes]
+    a, b = 1.0, 0.0
+    cur = _platt_loss(xs, y, a, b, l2)
+    for _ in range(iters):
+        ga, gb = l2 * (a - 1), l2 * b
+        haa, hab, hbb = l2, 0.0, l2
+        for x, t in zip(xs, y):
+            s = _sigmoid(a * x + b)
+            r = s - (1.0 if t else 0.0)
+            w = s * (1 - s)
+            ga += r * x
+            gb += r
+            haa += w * x * x
+            hab += w * x
+            hbb += w
+        det = haa * hbb - hab * hab
+        if abs(det) < 1e-12:
+            break
+        da = (hbb * ga - hab * gb) / det
+        db = (haa * gb - hab * ga) / det
+        step = 1.0
+        while step > 1e-6:
+            na, nb = a - step * da, b - step * db
+            new = _platt_loss(xs, y, na, nb, l2)
+            if new <= cur:
+                break
+            step *= 0.5
+        else:
+            break
+        moved = abs(na - a) + abs(nb - b)
+        a, b, cur = na, nb, new
+        if moved < 1e-10:
+            break
+    return a, b
+
+
+def platt_apply(p_yes: float, a: float, b: float) -> float:
+    return _sigmoid(a * _logit(p_yes) + b)
+
+
+def temper(probs: dict[str, float], t: float) -> dict[str, float]:
+    """softmax(log p / T) over the same keys; zeros stay zero. Identical to
+    dividing the logprobs by T before the softmax (the constant cancels)."""
+    if t == 1.0:
+        return dict(probs)
+    logs = {k: math.log(v) / t for k, v in probs.items() if v > 0}
+    if not logs:
+        return dict(probs)
+    m = max(logs.values())  # log-space: v ** (1/T) underflows to all-zero at small T
+    w = {k: math.exp(logs[k] - m) if k in logs else 0.0 for k in probs}
+    z = sum(w.values())
+    return {k: v / z for k, v in w.items()}
+
+
+def apply_calibration(raw_answers: dict, cal: dict | None) -> dict:
+    """Calibrated copy of extract_answers() output. The committed answer never
+    changes, only the probabilities and the fields derived from them
+    (noul/confidence/score). Per type: Platt when calibration.json has one
+    (noul only: it supersedes T there), else temperature T, else passthrough.
+    `raw_answers` is not modified, so the caller can log both."""
+    cal = cal or {}
+    temps, platt = cal.get("temperatures") or {}, cal.get("platt") or {}
+    out: dict[str, Any] = {}
+    for qid, ans in raw_answers.items():
+        ans = dict(ans)
+        out[qid] = ans
+        probs = ans.get("probabilities")
+        kind = ans.get("type")
+        if not probs or "error" in ans:
+            continue
+        if kind == "noul" and kind in platt:
+            py = platt_apply(probs["yes"], platt[kind]["a"], platt[kind]["b"])
+            probs = {"yes": py, "no": 1.0 - py}
+        else:
+            probs = temper(probs, temperature_for(kind, temps))
+        ans["probabilities"] = probs
+        if kind == "noul":
+            ans["noul"] = probs["yes"]
+            ans["confidence"] = max(probs.values())
+        elif kind == "choice":
+            ans["confidence"] = probs.get(ans["choice"], 0.0)
+        elif kind == "score":
+            ans["score"] = sum(int(k) * v for k, v in probs.items())
+            ans["confidence"] = probs.get(str(ans["level"]), 0.0)
+    return out
 
 
 def _candidate_matches(tok_text: str, candidates: list[str], prefer: str | None = None) -> list[str]:
@@ -289,6 +468,7 @@ def extract_answers(raw_json: dict, questions: dict, logprobs: list | None,
             ans = {
                 "type": "score",
                 "score": float(idx),
+                "level": idx,  # the committed level; "score" becomes the expectation below
                 "legend": {str(i): v for i, v in enumerate(levels)},
             }
             if p is not None:
