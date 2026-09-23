@@ -1,0 +1,11 @@
+# data, runs and scratch stay on the box: _data holds private gate items
+_data/
+_runs/
+_pkg/
+_*.log
+_*.py
+_*.sh
+_report_partial.*
+# host operations (which units stop, which guard loads a model): private, not public repo
+laya_window.sh
+brain_window.sh
