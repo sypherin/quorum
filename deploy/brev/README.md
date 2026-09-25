@@ -31,7 +31,7 @@ TypeSafe.
 Setup script:
 
 ```bash
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 curl -fsSL https://raw.githubusercontent.com/sypherin/quorum/master/deploy/brev/setup.sh | bash
 ```

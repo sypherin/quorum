@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # quorum on an NVIDIA Brev GPU VM (VM mode, Jupyter on). The Launchable's setup
 # script fetches and runs this file once, at deploy.
 #
