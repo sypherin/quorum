@@ -10,8 +10,9 @@ TypeSafe.
 - [setup.sh](setup.sh) runs once at deploy. It downloads the model at a pinned revision,
   checks its sha256, starts llama-server (CUDA, Docker) on 127.0.0.1:8005 and quorum on
   127.0.0.1:8017 as systemd units that come back after a stop/start, then asks one
-  question as a smoke test. It stops with an error if any layer of the model lands on
-  the CPU. Its log is `~/workspace/quorum-setup.log`.
+  question as a smoke test. It stops with an error if the GPU holds less memory than the
+  model file, the sign of a model that fell back to the CPU. Its log is
+  `~/workspace/quorum-setup.log`.
 - [quickstart.ipynb](quickstart.ipynb) checks the services, sends one request with all
   three question types, measures latency and reruns SST-2, AG News and SST-5. The setup
   script copies it to `~/workspace/quorum-quickstart.ipynb`.
@@ -75,7 +76,8 @@ again later. Check the hourly price in the Brev console before you deploy.
 
 Deployed from the Launchable on 25 Sep 2026 on one L4 (AWS g6.xlarge), judge model. The
 setup script finished with the model fully on the GPU (4958 MiB held for a 4082 MiB
-file), and the benchmark rerun in the notebook scored within 0.020 of the published run:
+file), and the notebook's benchmark commands, run from a shell on the instance, scored
+within 0.020 of the published run:
 
 | task | items | published (integrated GPU) | this L4 |
 |---|---|---|---|
