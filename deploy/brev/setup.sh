@@ -139,12 +139,15 @@ for _ in $(seq 1 120); do
 done
 curl -sf 127.0.0.1:8005/health >/dev/null \
   || die "llama-server not healthy after 10 min: $SUDO journalctl -u quorum-llm -n 50"
-# a model that silently landed on the CPU still answers, just 10x slower: check the offload
-OFFLOAD=$($SUDO docker logs quorum-llm 2>&1 | grep -oE 'offloaded [0-9]+/[0-9]+ layers to GPU' | tail -1 || true)
-[ -n "$OFFLOAD" ] || die "no GPU offload line in the llama-server log: $SUDO docker logs quorum-llm"
-read -r DONE TOTAL < <(echo "$OFFLOAD" | sed -E 's/offloaded ([0-9]+)\/([0-9]+).*/\1 \2/')
-[ "$DONE" -eq "$TOTAL" ] || die "only $OFFLOAD: the model is partly on the CPU"
-log "llama-server: $OFFLOAD"
+# a model that silently landed on the CPU still answers, just 10x slower: check the
+# offload. This build does not log the offloaded-layers line at its default verbosity,
+# so check GPU memory instead: with every layer offloaded it holds more than the file
+# (weights + KV cache), while a CPU fallback leaves only the CUDA context (<1 GiB).
+MODEL_MIB=$(( $(stat -c %s "$MODELS/$FILE") / 1048576 ))
+GPU_MIB=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -1 | tr -d ' ')
+[ "$GPU_MIB" -ge $(( MODEL_MIB * 9 / 10 )) ] \
+  || die "GPU holds ${GPU_MIB} MiB for a ${MODEL_MIB} MiB model: it is on the CPU, at least in part"
+log "llama-server: GPU holds ${GPU_MIB} MiB for a ${MODEL_MIB} MiB model"
 
 for _ in $(seq 1 30); do
   curl -sf 127.0.0.1:8017/healthz >/dev/null && break

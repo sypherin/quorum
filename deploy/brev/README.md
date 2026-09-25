@@ -71,9 +71,19 @@ and a deleted one costs nothing. The model, the code and the notebook live in
 `~/workspace`, which survives a stop, so stop the instance when you are done and start it
 again later. Check the hourly price in the Brev console before you deploy.
 
-## Status
+## Tested
 
-The notebook and the quorum service ran end to end against llama-server serving the
-judge model, and the setup script's user handling ran in an Ubuntu container. The CUDA
-path of the setup script (GPU container, layer offload check) has not run on a Brev
-instance yet.
+Deployed from the Launchable on 25 Sep 2026 on one L4 (AWS g6.xlarge), judge model. The
+setup script finished with the model fully on the GPU (4958 MiB held for a 4082 MiB
+file), and the benchmark rerun in the notebook scored within 0.020 of the published run:
+
+| task | items | published (integrated GPU) | this L4 |
+|---|---|---|---|
+| sst2 | 150 | 0.793 | 0.813 |
+| agnews | 300 | 0.853 | 0.843 |
+| sst5 | 200 | 0.325 | 0.320 |
+
+sst2 after the cross-validated Platt threshold: 0.920 published, 0.907 here. Those gaps are
+3, 3 and 1 items, most likely from different GPU math moving a few probabilities across
+the decision line. Median time per item on the L4 was 287 to 313 ms.
+The first model load read the file from a cold disk and took about 2 minutes.
