@@ -162,6 +162,9 @@ standard. Higher is better in every column; Jev never sees gate.
 
 ## Quick start
 
+No local GPU? [deploy/brev](deploy/brev/) sets up the same stack on an NVIDIA GPU
+as a Brev Launchable, with a Jupyter notebook to try it.
+
 ```bash
 # the judgment model on :8005 (or any llama-server model)
 hf download AltronisSG/judgment-qc-gate-qwen3-4b-GGUF judgment-qwen3-4b-Q8_0.gguf --local-dir .
