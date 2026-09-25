@@ -7,6 +7,11 @@ you a GPU VM running a 4B model behind quorum, with a Jupyter notebook to try it
 rerun part of the [benchmark](../../docs/benchmark.md). quorum is not affiliated with
 TypeSafe.
 
+[![Launch on Brev](https://brev-assets.s3.us-west-1.amazonaws.com/nv-lb-dark.svg)](https://brev.nvidia.com/launchable/deploy?launchableID=env-3JnkCmQMcit00ziNb96rhMMdgBD)
+
+Deploying needs a Brev account, and the instance bills by the hour while it runs
+(see [Cost](#cost)).
+
 - [setup.sh](setup.sh) runs once at deploy. It downloads the model at a pinned revision,
   checks its sha256, starts llama-server (CUDA, Docker) on 127.0.0.1:8005 and quorum on
   127.0.0.1:8017 as systemd units that come back after a stop/start, then asks one
